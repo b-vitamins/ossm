@@ -1,0 +1,13 @@
+(specifications->manifest
+ '("python"
+   "python-pytorch"
+   "python-numpy@1"
+   "python-scikit-learn"
+   "python-pandas"
+   "python-torchsignature"
+   "python-sktime"
+   "python-torchcde"
+   "python-pytest"
+   "python-ruff"
+   "node-pyright"
+   ))
