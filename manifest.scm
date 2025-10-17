@@ -6,7 +6,6 @@
    "python-pandas"
    "python-torchsignature"
    "python-sktime"
-   "python-torchcde"
    "python-pytest"
    "python-ruff"
    "node-pyright"

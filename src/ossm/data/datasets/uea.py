@@ -18,7 +18,7 @@ class UEA(Dataset):
 
     Views:
       - raw   : returns {'times',(T,), 'values',(T,C), 'label'}
-      - coeff : adds cubic-spline coefficients via torchcde
+      - coeff : adds cubic-spline coefficients computed in torch
       - path  : windowed log-signature features via torchsignature
 
     Loader compatibility:

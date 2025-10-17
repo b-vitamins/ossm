@@ -5,7 +5,7 @@ PyTorch implementation for oscillatory state-space models. The project will incl
 ## Install
 
 ```bash
-pip install -e .[uea,cde,signature]
+pip install -e .[uea,signature]
 ````
 
 ## Quickstart
@@ -18,7 +18,7 @@ from ossm.data.datasets import UEA, pad_collate, coeff_collate, path_collate
 train_raw = UEA(root="data_dir", name="GunPoint", split="train", view="raw")
 raw_loader = DataLoader(train_raw, batch_size=64, shuffle=True, collate_fn=pad_collate)
 
-# NCDE (torchcde)
+# NCDE (cubic spline coefficients)
 train_cde = UEA(root="data_dir", name="GunPoint", split="train", view="coeff")
 cde_loader = DataLoader(train_cde, batch_size=64, shuffle=True, collate_fn=coeff_collate)
 
@@ -30,5 +30,4 @@ path_loader = DataLoader(train_path, batch_size=64, shuffle=True, collate_fn=pat
 ## Notes
 
 * UEA ARFF expected at: `<root>/raw/UEA/Multivariate_arff/<DatasetName>/<DatasetName>_{TRAIN|TEST}.arff`
-* `view="coeff"` requires `torchcde`
 * `view="path"` uses `torchsignature` (no-op if not installed)

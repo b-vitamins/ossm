@@ -21,7 +21,6 @@ dependencies = [
 
 [project.optional-dependencies]
 uea = ["sktime>=0.21.0"]
-cde = ["torchcde>=0.2.5"]
 signature = ["torchsignature @ git+https://github.com/b-vitamins/torchsignature"]
 
 [tool.pytest.ini_options]
