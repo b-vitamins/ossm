@@ -29,7 +29,9 @@ def load_uea_numpy(root: str, name: str, split: str) -> Tuple[np.ndarray, np.nda
         raise RuntimeError(
             "sktime is required to parse ARFF files. Install with `pip install sktime`."
         )
-    from sktime.datasets import load_from_arff_to_dataframe
+    from sktime.datasets import (  # pyright: ignore[reportMissingImports]
+        load_from_arff_to_dataframe,
+    )
 
     file_path = _arff_path(root, name, split)
     with warnings.catch_warnings():
