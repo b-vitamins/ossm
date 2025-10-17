@@ -39,13 +39,26 @@ ARFF files yourself:
 The dataset constructor accepts
 
 * `name`: dataset key from the archive,
-* `split`: `"train"` or `"test"` (no resampling performed),
+* `split`: final subset to materialise (`"train"`, `"test"`, `"val"`, `"all"`, or a
+  sequence such as `("train", "test")`),
 * `view`: one of `"raw"`, `"coeff"`, or `"path"`,
-* log-signature hyper-parameters (`steps`, `depth`, `basis`) when `view="path"`.
+* log-signature hyper-parameters (`steps`, `depth`, `basis`) when `view="path"`,
+* `source_splits`: base splits to ingest before further manipulation (defaults to
+  the requested `split` or both train/test when resampling),
+* `deduplicate`: drop repeated trajectories by comparing the original time grids
+  and observation matrices across the loaded source splits,
+* `resample` + `resample_seed`: deterministically repartition the aggregated pool
+  into new `train`/`val`/`test` subsets using either counts or proportions,
+* `record_grid`: attach the pre-normalisation time grid as `sample["grid"]`,
+* `record_source`: include `sample["source_index"]` and `sample["source_split"]`
+  (encoded via `dataset.source_split_encoding`) tracing back to the original
+  ARFF location.
 
 Each item is a dictionary with `times`, `values`, `label`, and when applicable
-either `coeffs` or `features`. Collate helpers in `ossm.data.datasets` pad,
-stack, and batch these tensors for PyTorch dataloaders.
+either `coeffs` or `features`. Optional metadata (`grid`, `source_*`) survives the
+transform pipeline so downstream code can faithfully reproduce the LinOSS data
+layout while staying within idiomatic PyTorch workflows. Collate helpers in
+`ossm.data.datasets` pad, stack, and batch these tensors for PyTorch dataloaders.
 
 ## Install
 
