@@ -19,7 +19,7 @@ class UEA(Dataset):
     Views:
       - raw   : returns {'times',(T,), 'values',(T,C), 'label'}
       - coeff : adds cubic-spline coefficients computed in torch
-      - path  : windowed log-signature features via torchsignature
+      - path  : windowed log-signature features via torchsignature (Hall basis by default)
 
     Loader compatibility:
       - Accepts loaders returning (times, values, labels) OR (values, labels).
@@ -37,11 +37,13 @@ class UEA(Dataset):
         depth: int = 2,
         download: bool = False,
         loader: Optional[Callable[..., Tuple]] = None,
+        basis: str = "hall",
     ) -> None:
         super().__init__()
         self.root, self.name, self.split = root, name, split
         self.view = view.lower()
         self.steps, self.depth = int(steps), int(depth)
+        self.basis = str(basis)
 
         if download:
             # Parity with torchvision-style datasets; creates expected folder layout.
@@ -88,10 +90,15 @@ class UEA(Dataset):
             tfms = [AddTime(), NormalizeTime(), ToCubicSplineCoeffs()]
         elif view == "path":
             # Let torchsignature do the windowing; don't pre-segment here.
+            basis = self.basis if self.depth == 2 else "lyndon"
             tfms = [
                 AddTime(),
                 NormalizeTime(),
-                ToWindowedLogSignature(depth=self.depth, steps=self.steps),
+                ToWindowedLogSignature(
+                    depth=self.depth,
+                    steps=self.steps,
+                    basis=basis,
+                ),
             ]
         else:
             raise ValueError(f"Unknown view '{view}'. Expected 'raw'|'coeff'|'path'.")

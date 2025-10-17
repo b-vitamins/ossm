@@ -23,11 +23,18 @@ train_cde = UEA(root="data_dir", name="GunPoint", split="train", view="coeff")
 cde_loader = DataLoader(train_cde, batch_size=64, shuffle=True, collate_fn=coeff_collate)
 
 # NRDE / Log-NCDE (torchsignature)
-train_path = UEA(root="data_dir", name="GunPoint", split="train", view="path", depth=3, steps=32)
+train_path = UEA(
+    root="data_dir",
+    name="GunPoint",
+    split="train",
+    view="path",
+    depth=2,
+    steps=32,
+)
 path_loader = DataLoader(train_path, batch_size=64, shuffle=True, collate_fn=path_collate)
 ```
 
 ## Notes
 
 * UEA ARFF expected at: `<root>/raw/UEA/Multivariate_arff/<DatasetName>/<DatasetName>_{TRAIN|TEST}.arff`
-* `view="path"` uses `torchsignature` (no-op if not installed)
+* `view="path"` uses `torchsignature` (no-op if not installed) and emits depth-2 Hall-basis log-signatures with the scalar coordinate included, matching the Signax/LinOSS preprocessing.
