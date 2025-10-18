@@ -4,6 +4,7 @@
    "python-numpy@1"
    "python-scikit-learn"
    "python-pandas"
+   "python-hydra-core"
    "python-torchsignature"
    "python-sktime"
    "python-pytest"
