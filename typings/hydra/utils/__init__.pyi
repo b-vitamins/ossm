@@ -1,0 +1,6 @@
+from typing import Any, Mapping
+
+
+def instantiate(config: Mapping[str, Any], /, **kwargs: Any) -> Any: ...
+
+def to_absolute_path(path: str, /) -> str: ...
