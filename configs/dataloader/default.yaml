@@ -1,0 +1,5 @@
+batch_size: 32
+shuffle: true
+num_workers: 0
+pin_memory: false
+collate: coeff

@@ -1,0 +1,7 @@
+name: linoss
+params:
+  num_blocks: 4
+  ssm_size: 64
+  ssm_blocks: 4
+  hidden_dim: 128
+  discretization: IM

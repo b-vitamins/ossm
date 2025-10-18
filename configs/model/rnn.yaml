@@ -1,0 +1,5 @@
+name: rnn
+params:
+  hidden_dim: 128
+  cell: linear
+  depth: 2

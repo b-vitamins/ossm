@@ -1,0 +1,3 @@
+# Default filesystem paths used by training utilities.
+data_root: ${oc.env:OSSM_DATA_ROOT,./data}
+work_dir: ${oc.env:OSSM_WORK_DIR,./outputs}

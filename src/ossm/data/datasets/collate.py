@@ -38,13 +38,29 @@ def coeff_collate(batch: List[Dict]):
     Km = max(b["coeffs"].size(0) for b in batch)
     B = len(batch)
     C4 = batch[0]["coeffs"].size(-1)
+    C = C4 // 4
     times = torch.zeros(B, Tm, dtype=batch[0]["times"].dtype)
     coeffs = torch.zeros(B, Km, C4, dtype=batch[0]["coeffs"].dtype)
-    Y = []
+    initials = torch.zeros(B, C, dtype=batch[0]["coeffs"].dtype)
+    mask = torch.zeros(B, Tm, dtype=torch.bool)
+    labels = []
+
     for i, b in enumerate(batch):
         t = b["times"].size(0)
         k = b["coeffs"].size(0)
         times[i, :t] = b["times"]
         coeffs[i, :k] = b["coeffs"]
-        Y.append(b["label"])
-    return {"times": times, "coeffs": coeffs, "label": torch.stack(Y)}
+        mask[i, :t] = True
+        if "initial" in b:
+            initials[i] = b["initial"]
+        else:
+            initials[i] = b["values"][0]
+        labels.append(b["label"])
+
+    return {
+        "times": times,
+        "coeffs": coeffs,
+        "initial": initials,
+        "mask": mask,
+        "label": torch.stack(labels),
+    }
