@@ -66,7 +66,62 @@ def _infer_dataset_metadata(dataset, *, classification: bool) -> Tuple[int, int]
     return input_dim, target_dim
 
 
-def _build_backbone(model_cfg: DictConfig, input_dim: int) -> Tuple[nn.Module, int]:
+def _infer_nrde_metadata(dataset) -> Tuple[int, torch.Tensor]:
+    if len(dataset) == 0:
+        raise ValueError("Dataset is empty; unable to infer NRDE metadata")
+
+    logsig_dim: Optional[int] = None
+    max_segments = 0
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+    interval_dtype: Optional[torch.dtype] = None
+
+    for idx in range(len(dataset)):
+        sample = dataset[idx]
+        features = sample.get("features")
+        if features is None:
+            raise ValueError("NRDE mode requires dataset samples to include 'features'")
+        if features.ndim != 2:
+            raise ValueError("Sample 'features' must have shape (segments, channels)")
+
+        segments = int(features.size(0))
+        if segments > max_segments:
+            max_segments = segments
+
+        if segments > 0:
+            dim = int(features.size(-1))
+            if logsig_dim is None:
+                logsig_dim = dim
+            elif dim != logsig_dim:
+                raise ValueError("Inconsistent log-signature dimensions across samples")
+
+        times = sample.get("times")
+        if times is not None and times.ndim == 1 and times.numel() > 1:
+            interval_dtype = times.dtype
+            start = float(times[0])
+            end = float(times[-1])
+            start_time = start if start_time is None else min(start_time, start)
+            end_time = end if end_time is None else max(end_time, end)
+        elif interval_dtype is None and features.numel():
+            interval_dtype = features.dtype
+
+    if logsig_dim is None:
+        raise ValueError("Unable to infer log-signature dimension from dataset")
+    if max_segments == 0:
+        raise ValueError("Unable to infer NRDE intervals from empty feature tensors")
+
+    if start_time is None or end_time is None:
+        start_time, end_time = 0.0, 1.0
+    if interval_dtype is None:
+        interval_dtype = torch.float32
+
+    intervals = torch.linspace(start_time, end_time, max_segments + 1, dtype=interval_dtype)
+    return logsig_dim, intervals
+
+
+def _build_backbone(
+    model_cfg: DictConfig, input_dim: int, dataset=None
+) -> Tuple[nn.Module, int]:
     name = model_cfg.name.lower()
     params = OmegaConf.to_container(model_cfg.params, resolve=True)
     if not isinstance(params, dict):
@@ -115,6 +170,16 @@ def _build_backbone(model_cfg: DictConfig, input_dim: int) -> Tuple[nn.Module, i
             mlp_width=int(params.get("mlp_width", 128)),
         )
     elif name == "ncde":
+        mode = str(params.get("mode", "ncde")).lower()
+        if mode == "nrde" and dataset is not None:
+            need_logsig = "logsig_dim" not in params
+            need_intervals = "intervals" not in params
+            if need_logsig or need_intervals:
+                logsig_dim, intervals = _infer_nrde_metadata(dataset)
+                if need_logsig:
+                    params["logsig_dim"] = logsig_dim
+                if need_intervals:
+                    params["intervals"] = intervals.tolist()
         backbone = NCDEBackbone(
             input_dim=input_dim,
             hidden_dim=int(params.get("hidden_dim", 128)),
@@ -126,7 +191,7 @@ def _build_backbone(model_cfg: DictConfig, input_dim: int) -> Tuple[nn.Module, i
             step_size=float(params.get("step_size", 1.0)),
             rtol=float(params.get("rtol", 1e-4)),
             atol=float(params.get("atol", 1e-5)),
-            mode=str(params.get("mode", "ncde")),
+            mode=mode,
             logsig_dim=params.get("logsig_dim"),
             intervals=params.get("intervals"),
         )
@@ -192,7 +257,7 @@ def main(cfg: DictConfig) -> None:
     val_dataset = instantiate(cfg.validation_dataset, root=val_root)
 
     input_dim, target_dim = _infer_dataset_metadata(train_dataset, classification=cfg.training.classification)
-    backbone, hidden_dim = _build_backbone(cfg.model, input_dim)
+    backbone, hidden_dim = _build_backbone(cfg.model, input_dim, dataset=train_dataset)
     head = _build_head(cfg.head, hidden_dim, target_dim)
 
     device = torch.device(cfg.training.device)
