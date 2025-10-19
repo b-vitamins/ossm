@@ -1,9 +1,12 @@
 from __future__ import annotations
-import os
-import warnings
+
 import importlib
 import importlib.util
+import os
+import pickle
+import warnings
 from typing import Tuple
+
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
@@ -23,7 +26,46 @@ def _df_to_numpy(data_df: pd.DataFrame) -> np.ndarray:
     return np.stack([np.vstack(x).T for x in data_expand]).astype(np.float32)
 
 
+def _load_processed_split(root: str, name: str, split: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Load a dataset split from the processed LinOSS layout if available."""
+
+    split = split.lower()
+    base = os.path.join(root, "processed", "UEA", name)
+    if not os.path.isdir(base):
+        raise FileNotFoundError
+
+    if split in {"train", "test", "val", "validation"}:
+        if split == "validation":
+            split = "val"
+        x_file = os.path.join(base, f"X_{split}.pkl")
+        y_file = os.path.join(base, f"y_{split}.pkl")
+    elif split in {"all", "full"}:
+        x_file = os.path.join(base, "data.pkl")
+        y_file = os.path.join(base, "labels.pkl")
+    else:
+        raise ValueError(f"Unknown processed split '{split}' for dataset '{name}'.")
+
+    if not os.path.exists(x_file) or not os.path.exists(y_file):
+        raise FileNotFoundError
+
+    with open(x_file, "rb") as f:
+        X = pickle.load(f)
+    with open(y_file, "rb") as f:
+        y = pickle.load(f)
+
+    X = np.asarray(X, dtype=np.float32)
+    y = np.asarray(y)
+    if y.ndim > 1:
+        y = y.argmax(axis=-1)
+    return X, y
+
+
 def load_uea_numpy(root: str, name: str, split: str) -> Tuple[np.ndarray, np.ndarray]:
+    try:
+        return _load_processed_split(root, name, split)
+    except FileNotFoundError:
+        pass
+
     sktime_spec = importlib.util.find_spec("sktime")
     if sktime_spec is None:
         raise RuntimeError(
