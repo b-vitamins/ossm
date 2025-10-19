@@ -51,3 +51,24 @@ def test_coeff_collate_shapes():
     assert out["initial"].shape == (2, 3)
     assert out["mask"].dtype == torch.bool
     assert out["mask"].shape == (2, 8)
+
+
+def test_coeff_collate_flat_coeffs():
+    b = [
+        {
+            "times": torch.linspace(0, 1, 4),
+            "coeffs": torch.randn(3, 12),
+            "initial": torch.randn(3),
+            "label": torch.tensor(0),
+        },
+        {
+            "times": torch.linspace(0, 1, 5),
+            "coeffs": torch.randn(4, 12),
+            "initial": torch.randn(3),
+            "label": torch.tensor(1),
+        },
+    ]
+    out = coeff_collate(b)
+    assert out["times"].shape == (2, 5)
+    assert out["coeffs"].shape == (2, 4, 12)
+    assert out["initial"].shape == (2, 3)
