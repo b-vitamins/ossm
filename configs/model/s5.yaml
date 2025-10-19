@@ -1,0 +1,9 @@
+name: s5
+params:
+  num_blocks: 4
+  ssm_size: 64
+  ssm_blocks: 1
+  hidden_dim: 128
+  discretization: zoh
+  conj_sym: true
+  clip_eigs: false

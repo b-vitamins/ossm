@@ -1,0 +1,8 @@
+name: lru
+params:
+  num_blocks: 4
+  ssm_size: 64
+  hidden_dim: 128
+  r_min: 0.0
+  r_max: 1.0
+  max_phase: 6.28318

@@ -1,0 +1,3 @@
+name: classification
+params:
+  dropout: 0.0

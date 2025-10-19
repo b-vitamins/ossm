@@ -1,0 +1,14 @@
+defaults:
+  - paths: default
+  - dataset: uea_coeff_train
+  - validation_dataset: uea_coeff_val
+  - model: linoss_im
+  - head: classification
+  - optimizer: adamw
+  - scheduler: none
+  - dataloader: default
+  - training: classification
+  - _self_
+
+seed: 0
+

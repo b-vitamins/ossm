@@ -1,0 +1,9 @@
+_target_: ossm.data.datasets.UEA
+root: ${paths.data_root}
+name: EthanolConcentration
+split: train
+view: coeff
+steps: 32
+depth: 2
+record_grid: false
+record_source: false
