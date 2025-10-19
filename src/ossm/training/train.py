@@ -73,13 +73,18 @@ def step(
     labels = cast(Tensor, batch["label"])
 
     if isinstance(backbone, NCDEBackbone):
-        backbone_input: Dict[str, Tensor] = {
-            "times": cast(Tensor, batch["times"]),
-            "coeffs": cast(Tensor, batch["coeffs"]),
-            "initial": cast(Tensor, batch["initial"]),
-        }
-        if "mask" in batch:
-            backbone_input["mask"] = cast(Tensor, batch["mask"])
+        times = cast(Tensor, batch["times"])
+        initial = cast(Tensor, batch["initial"])
+        if "logsig" in batch:
+            backbone_input = {"times": times, "logsig": cast(Tensor, batch["logsig"]), "initial": initial}
+        else:
+            backbone_input = {
+                "times": times,
+                "coeffs": cast(Tensor, batch["coeffs"]),
+                "initial": initial,
+            }
+            if "mask" in batch:
+                backbone_input["mask"] = cast(Tensor, batch["mask"])
         if "evaluation_times" in batch:
             backbone_input["evaluation_times"] = cast(Tensor, batch["evaluation_times"])
         backbone_out = backbone(backbone_input)

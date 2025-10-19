@@ -24,13 +24,36 @@ def path_collate(batch: List[Dict]):
     Smax = max(b["features"].size(0) for b in batch)
     B = len(batch)
     D = batch[0]["features"].size(-1)
-    F = torch.zeros(B, Smax, D, dtype=batch[0]["features"].dtype)
-    Y = []
+
+    logsig = torch.zeros(B, Smax, D, dtype=batch[0]["features"].dtype)
+    if "values" in batch[0]:
+        init_dim = batch[0]["values"].size(-1)
+        init_dtype = batch[0]["values"].dtype
+    else:
+        init_dim = D
+        init_dtype = batch[0]["features"].dtype
+    initials = torch.zeros(B, init_dim, dtype=init_dtype)
+    labels = []
     for i, b in enumerate(batch):
-        s = b["features"].size(0)
-        F[i, :s] = b["features"]
-        Y.append(b["label"])
-    return {"features": F, "label": torch.stack(Y)}
+        segments = b["features"].size(0)
+        logsig[i, :segments] = b["features"]
+        if "values" in b:
+            initials[i] = b["values"][0]
+        labels.append(b["label"])
+
+    if "times" in batch[0]:
+        time_dtype = batch[0]["times"].dtype
+    else:
+        time_dtype = batch[0]["features"].dtype
+    times = torch.linspace(0.0, 1.0, Smax + 1, dtype=time_dtype)
+
+    return {
+        "logsig": logsig,
+        "times": times,
+        "initial": initials,
+        "label": torch.stack(labels),
+        "features": logsig,
+    }
 
 
 def coeff_collate(batch: List[Dict]):
