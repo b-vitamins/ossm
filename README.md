@@ -92,6 +92,74 @@ train_path = UEA(
 path_loader = DataLoader(train_path, batch_size=64, shuffle=True, collate_fn=path_collate)
 ```
 
+## Training with `train.py`
+
+The training entrypoint is implemented in [`train.py`](./train.py) and is configured
+with [Hydra](https://hydra.cc). The default configuration (`configs/config.yaml`)
+trains a LinOSS backbone on the EthanolConcentration coefficients view and logs
+artifacts under `./outputs`.
+
+### Basic invocation
+
+1. Download the desired UEA dataset so that the ARFF files live under
+   `<data_root>/raw/UEA/Multivariate_arff/<DatasetName>/` as shown above.
+2. Point the `OSSM_DATA_ROOT` environment variable at that directory (or accept
+   the default `./data`).
+3. Run the training script:
+
+   ```bash
+   OSSM_DATA_ROOT=/path/to/data python train.py
+   ```
+
+Hydra mirrors its working directory to `${OSSM_WORK_DIR:-./outputs}` and writes a
+separate timestamped folder for each run containing the resolved configuration,
+logs, and any checkpoints saved by callbacks.
+
+### Customising runs with Hydra overrides
+
+Any field inside the configuration tree can be overridden from the command line.
+Common adjustments include:
+
+* Switching the dataset split or representation:
+
+  ```bash
+  python train.py \
+      dataset.name=GunPoint \
+      dataset.split=train \
+      dataset.view=raw \
+      dataloader.collate=pad \
+      training.max_steps=2000
+  ```
+
+* Training on GPU with a different backbone:
+
+  ```bash
+  python train.py model=ncde training.device=cuda:0 optimizer.lr=3e-4
+  ```
+
+  When running in NRDE mode, remember to request the log-signature view and its
+  collate helper:
+
+  ```bash
+  python train.py \
+      model=ncde \
+      model.params.mode=nrde \
+      dataset.view=path \
+      dataloader.collate=path \
+      dataset.steps=16 \
+      dataset.depth=2
+  ```
+
+* Sweeping over multiple backbones with Hydra's multirun support:
+
+  ```bash
+  python train.py --multirun model=linoss_im,lru training.max_steps=5000
+  ```
+
+Refer to the `configs/` directory for the available model, optimiser, and data
+presets. Hydra will compose the requested defaults, apply CLI overrides, and
+emit the fully-resolved configuration alongside the run logs.
+
 ## Notes
 
 * UEA ARFF expected at: `<root>/raw/UEA/Multivariate_arff/<DatasetName>/<DatasetName>_{TRAIN|TEST}.arff`
