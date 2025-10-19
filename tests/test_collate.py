@@ -34,20 +34,20 @@ def test_coeff_collate_shapes():
     b = [
         {
             "times": torch.linspace(0, 1, 6),
-            "coeffs": torch.randn(5, 12),
+            "coeffs": torch.randn(5, 3, 4),
             "initial": torch.randn(3),
             "label": torch.tensor(0),
         },
         {
             "times": torch.linspace(0, 1, 8),
-            "coeffs": torch.randn(7, 12),
+            "coeffs": torch.randn(7, 3, 4),
             "initial": torch.randn(3),
             "label": torch.tensor(1),
         },
     ]
     out = coeff_collate(b)
     assert out["times"].shape == (2, 8)
-    assert out["coeffs"].shape == (2, 7, 12)
+    assert out["coeffs"].shape == (2, 7, 3, 4)
     assert out["initial"].shape == (2, 3)
     assert out["mask"].dtype == torch.bool
     assert out["mask"].shape == (2, 8)
