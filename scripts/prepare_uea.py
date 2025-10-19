@@ -5,11 +5,13 @@ import argparse
 import os
 import pickle
 import shutil
+import warnings
 import zipfile
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
+import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 from sktime.datasets import load_from_arff_to_dataframe  # type: ignore[import]
 from tqdm import tqdm
@@ -84,6 +86,18 @@ def _extract_archive(archive_path: Path, target_dir: Path, *, force: bool = Fals
         nested_root.rmdir()
 
 
+def _load_split(arff_dir: Path, dataset: str, split: str) -> Tuple[np.ndarray, np.ndarray]:
+    file_path = arff_dir / dataset / f"{dataset}_{split.upper()}.arff"
+    if not file_path.exists():
+        raise FileNotFoundError(f"Missing {split} file for dataset '{dataset}'")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=pd.errors.PerformanceWarning)
+        data_frame, labels = load_from_arff_to_dataframe(str(file_path))
+    values = _convert_dataframe(data_frame)
+    return values, np.asarray(labels)
+
+
 def _convert_dataframe(data_frame) -> np.ndarray:
     """Convert a sktime dataframe into a (N, T, C) float32 array."""
 
@@ -92,14 +106,23 @@ def _convert_dataframe(data_frame) -> np.ndarray:
     return np.stack(stacked).astype(np.float32)
 
 
-def _load_split(arff_dir: Path, dataset: str, split: str) -> Tuple[np.ndarray, np.ndarray]:
-    file_path = arff_dir / dataset / f"{dataset}_{split.upper()}.arff"
-    if not file_path.exists():
-        raise FileNotFoundError(f"Missing {split} file for dataset '{dataset}'")
+def _deduplicate(
+    data: np.ndarray, labels: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Remove duplicate samples while preserving the original order."""
 
-    data_frame, labels = load_from_arff_to_dataframe(str(file_path))
-    values = _convert_dataframe(data_frame)
-    return values, np.asarray(labels)
+    flat = data.reshape(data.shape[0], -1)
+    _, keep_indices, inverse = np.unique(flat, axis=0, return_index=True, return_inverse=True)
+    order = np.argsort(keep_indices)
+    keep_sorted = keep_indices[order]
+
+    remap = np.empty_like(order)
+    remap[order] = np.arange(order.size)
+    dedup_inverse = remap[inverse]
+
+    dedup_data = data[keep_sorted]
+    dedup_labels = labels[keep_sorted]
+    return dedup_data, dedup_labels, keep_sorted, dedup_inverse
 
 
 def _encode_labels(
@@ -131,10 +154,14 @@ def _process_dataset(dataset: str, arff_dir: Path, processed_dir: Path, *, force
     data = np.concatenate([X_train, X_test], axis=0)
     labels = np.concatenate([y_train, y_test], axis=0)
 
-    original_indices = (
-        np.arange(0, X_train.shape[0], dtype=np.int64),
-        np.arange(X_train.shape[0], data.shape[0], dtype=np.int64),
-    )
+    data, labels, _, inverse = _deduplicate(data, labels)
+
+    train_inverse = inverse[: X_train.shape[0]]
+    test_inverse = inverse[X_train.shape[0] :]
+    train_unique = np.unique(train_inverse)
+    test_unique = np.unique(test_inverse)
+
+    original_indices = (train_unique.astype(np.int64), test_unique.astype(np.int64))
 
     _save_pickle(X_train, target_dir / "X_train.pkl")
     _save_pickle(y_train, target_dir / "y_train.pkl")
