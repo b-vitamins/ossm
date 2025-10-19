@@ -409,6 +409,7 @@ class NCDEBackbone(Backbone):
         super().__init__()
         mode = mode.lower()
         self.mode = mode
+        self.hidden_dim = int(hidden_dim)
         if mode == "ncde":
             self.layer = NCDELayer(
                 input_dim,
