@@ -66,7 +66,9 @@ def _infer_dataset_metadata(dataset, *, classification: bool) -> Tuple[int, int]
     return input_dim, target_dim
 
 
-def _build_backbone(model_cfg: DictConfig, input_dim: int) -> Tuple[nn.Module, int]:
+def _build_backbone(
+    model_cfg: DictConfig, input_dim: int, dataset=None
+) -> Tuple[nn.Module, int]:
     name = model_cfg.name.lower()
     params = OmegaConf.to_container(model_cfg.params, resolve=True)
     if not isinstance(params, dict):
@@ -115,6 +117,24 @@ def _build_backbone(model_cfg: DictConfig, input_dim: int) -> Tuple[nn.Module, i
             mlp_width=int(params.get("mlp_width", 128)),
         )
     elif name == "ncde":
+        mode = str(params.get("mode", "ncde")).lower()
+        if mode == "nrde" and dataset is not None:
+            sample = dataset[0]
+            features = sample.get("features")
+            if features is None:
+                raise ValueError(
+                    "NRDE mode requires a dataset that provides 'features'."
+                )
+            params.setdefault("logsig_dim", int(features.shape[-1]))
+            if "intervals" not in params:
+                segments = int(features.shape[0])
+                times = sample.get("times")
+                if times is not None and times.ndim == 1 and times.numel() > 1:
+                    start, end = float(times[0]), float(times[-1])
+                else:
+                    start, end = 0.0, 1.0
+                intervals = torch.linspace(start, end, segments + 1)
+                params["intervals"] = intervals.tolist()
         backbone = NCDEBackbone(
             input_dim=input_dim,
             hidden_dim=int(params.get("hidden_dim", 128)),
@@ -126,7 +146,7 @@ def _build_backbone(model_cfg: DictConfig, input_dim: int) -> Tuple[nn.Module, i
             step_size=float(params.get("step_size", 1.0)),
             rtol=float(params.get("rtol", 1e-4)),
             atol=float(params.get("atol", 1e-5)),
-            mode=str(params.get("mode", "ncde")),
+            mode=mode,
             logsig_dim=params.get("logsig_dim"),
             intervals=params.get("intervals"),
         )
@@ -192,7 +212,7 @@ def main(cfg: DictConfig) -> None:
     val_dataset = instantiate(cfg.validation_dataset, root=val_root)
 
     input_dim, target_dim = _infer_dataset_metadata(train_dataset, classification=cfg.training.classification)
-    backbone, hidden_dim = _build_backbone(cfg.model, input_dim)
+    backbone, hidden_dim = _build_backbone(cfg.model, input_dim, dataset=train_dataset)
     head = _build_head(cfg.head, hidden_dim, target_dim)
 
     device = torch.device(cfg.training.device)
