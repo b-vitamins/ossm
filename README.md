@@ -101,8 +101,11 @@ artifacts under `./outputs`.
 
 ### Basic invocation
 
-1. Download the desired UEA dataset so that the ARFF files live under
-   `<data_root>/raw/UEA/Multivariate_arff/<DatasetName>/` as shown above.
+1. Prepare the desired UEA dataset so that the ARFF files live under
+   `<data_root>/raw/UEA/Multivariate_arff/<DatasetName>/` as shown above. The
+   [`scripts/prepare_uea.py`](./scripts/prepare_uea.py) helper downloads the
+   archive to `~/.cache/torch/datasets/ossm` by default and materialises the
+   processed pickles expected by the dataset loader.
 2. Point the `OSSM_DATA_ROOT` environment variable at that directory (or accept
    the default `./data`).
 3. Run the training script:
@@ -119,6 +122,17 @@ logs, and any checkpoints saved by callbacks.
 
 Any field inside the configuration tree can be overridden from the command line.
 Common adjustments include:
+
+* Pre-populating the cache using the helper script:
+
+  ```bash
+  # Downloads the archive to ~/.cache/torch/datasets/ossm by default and
+  # materialises train/test pickles for the requested datasets.
+  python scripts/prepare_uea.py --datasets EthanolConcentration
+
+  # Point OSSM_DATA_ROOT at the processed cache before training.
+  OSSM_DATA_ROOT=~/.cache/torch/datasets/ossm python train.py
+  ```
 
 * Switching the dataset split or representation:
 
