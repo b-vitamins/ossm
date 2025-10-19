@@ -125,8 +125,11 @@ Common adjustments include:
   ```bash
   python train.py \
       dataset.name=GunPoint \
+      validation_dataset.name=GunPoint \
       dataset.split=train \
+      validation_dataset.split=validation \
       dataset.view=raw \
+      validation_dataset.view=raw \
       dataloader.collate=pad \
       training.max_steps=2000
   ```
