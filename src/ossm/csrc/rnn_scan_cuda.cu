@@ -1,5 +1,6 @@
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 #include <vector>
 
@@ -52,7 +53,7 @@ at::Tensor linear_rnn_scan_cuda(const at::Tensor& weight_hh,
                                 const at::Tensor& bias,
                                 const at::Tensor& inputs,
                                 const at::Tensor& initial_state) {
-  at::cuda::CUDAGuard device_guard(inputs.device());
+  c10::cuda::OptionalCUDAGuard device_guard{inputs.device()};
   return linear_rnn_scan_cuda_impl(weight_hh, weight_xh, bias, inputs, initial_state);
 }
 

@@ -1,5 +1,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/Exceptions.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 
 #include <algorithm>
@@ -121,7 +122,7 @@ void linoss_scan_cuda(const at::Tensor& m11,
                       const at::Tensor& m22,
                       const at::Tensor& b_seq,
                       at::Tensor& output) {
-  at::cuda::CUDAGuard device_guard(b_seq.device());
+  c10::cuda::OptionalCUDAGuard device_guard{b_seq.device()};
 
   const auto length = b_seq.size(0);
   const auto batch = b_seq.size(1);
