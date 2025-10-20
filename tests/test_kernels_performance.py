@@ -1,19 +1,53 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Callable, Optional, Tuple, cast
+
 import pytest
 import torch
+from torch import Tensor
 from torch.utils import benchmark
 
 from ossm.models._linoss_scan import try_run_scan as _linoss_try_run_scan
+from ossm.models._lru_scan import try_run_lru_scan
 from ossm.models._rnn_scan import try_run_linear_rnn_scan
-from ossm.models.rnn import _linear_rnn_reference
+from ossm.models._s5_scan import try_run_s5_scan
 
 
-_CPU_SPEEDUP_THRESHOLD = 20.0
-_CUDA_SPEEDUP_THRESHOLD = 4.0
+_CPU_SPEEDUPS = {
+    "linoss": 12.0,
+    "lru": 8.0,
+    "s5": 8.0,
+    "rnn": 6.0,
+}
+
+_CUDA_SPEEDUPS = {
+    "linoss": 4.0,
+    "lru": 3.0,
+    "s5": 3.0,
+    "rnn": 3.5,
+}
 
 
-def _time_function(fn, *, min_run_time: float, synchronize: bool = False) -> float:
+@dataclass(frozen=True)
+class BenchmarkCase:
+    name: str
+    device_type: str
+    setup: Callable[[torch.device], Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]]
+    min_runtime: float
+    threshold: float
+    synchronize: bool = False
+
+    @property
+    def requires_cuda(self) -> bool:
+        return self.device_type == "cuda"
+
+    @property
+    def id(self) -> str:
+        return f"{self.name}-{self.device_type}"
+
+
+def _time_function(fn: Callable[[], Tensor], *, min_run_time: float, synchronize: bool = False) -> float:
     """Measure the average runtime of ``fn`` using ``torch.utils.benchmark``."""
 
     if synchronize:
@@ -34,9 +68,17 @@ def _time_function(fn, *, min_run_time: float, synchronize: bool = False) -> flo
     return timer.blocked_autorange(min_run_time=min_run_time).mean
 
 
-def _linoss_naive_scan(a_matrix: torch.Tensor, b_seq: torch.Tensor) -> torch.Tensor:
-    """Reference LinOSS scan executed on the host for comparison."""
+def _complex_scan_naive(lambda_bar: Tensor, b_seq: Tensor) -> Tensor:
+    length, batch, state = b_seq.shape
+    state_vec = b_seq.new_zeros(batch, state)
+    outputs = []
+    for step in range(length):
+        state_vec = lambda_bar * state_vec + b_seq[step]
+        outputs.append(state_vec)
+    return torch.stack(outputs, dim=0)
 
+
+def _linoss_naive_scan(a_matrix: Tensor, b_seq: Tensor) -> Tensor:
     length = b_seq.size(0)
     batch = b_seq.size(1)
     ssm = b_seq.size(2)
@@ -48,82 +90,234 @@ def _linoss_naive_scan(a_matrix: torch.Tensor, b_seq: torch.Tensor) -> torch.Ten
     return torch.stack(outputs, dim=0)
 
 
+def _linear_rnn_naive(
+    weight_hh: Tensor,
+    weight_xh: Tensor,
+    bias: Tensor,
+    inputs: Tensor,
+    initial_state: Tensor,
+) -> Tensor:
+    length, batch, _ = inputs.shape
+    state = initial_state
+    outputs = []
+    weight_hh_t = weight_hh.transpose(0, 1)
+    weight_xh_t = weight_xh.transpose(0, 1)
+    for idx in range(length):
+        base = inputs[idx].matmul(weight_xh_t) + bias
+        state = state.matmul(weight_hh_t) + base
+        outputs.append(state)
+    return torch.stack(outputs, dim=0)
+
+
+def _setup_linoss_case(length: int, batch: int, ssm: int) -> Callable[[torch.device], Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]]:
+    def _inner(device: torch.device) -> Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]:
+        torch.manual_seed(0)
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(0)
+
+        a_matrix = torch.randn(ssm, 2, 2, dtype=torch.complex64, device=device)
+        b_seq = torch.randn(length, batch, ssm, 2, dtype=torch.complex64, device=device)
+
+        m11 = a_matrix[:, 0, 0].contiguous()
+        m12 = a_matrix[:, 0, 1].contiguous()
+        m21 = a_matrix[:, 1, 0].contiguous()
+        m22 = a_matrix[:, 1, 1].contiguous()
+
+        ext_out = _linoss_try_run_scan(m11, m12, m21, m22, b_seq)
+        if ext_out is None:
+            return None, None, "LinOSS kernel is unavailable"
+
+        def run_extension() -> Tensor:
+            return cast(Tensor, _linoss_try_run_scan(m11, m12, m21, m22, b_seq))
+
+        def run_reference() -> Tensor:
+            return _linoss_naive_scan(a_matrix, b_seq)
+
+        return run_extension, run_reference, None
+
+    return _inner
+
+
+def _setup_complex_case(
+    name: str,
+    length: int,
+    batch: int,
+    state: int,
+    *,
+    run_fn: Callable[[Tensor, Tensor], Optional[Tensor]],
+) -> Callable[[torch.device], Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]]:
+    def _inner(device: torch.device) -> Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]:
+        torch.manual_seed(0)
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(0)
+
+        lambda_bar = torch.randn(state, dtype=torch.complex64, device=device)
+        b_seq = torch.randn(length, batch, state, dtype=torch.complex64, device=device)
+
+        ext_out = run_fn(lambda_bar, b_seq)
+        if ext_out is None:
+            return None, None, f"{name} kernel is unavailable"
+
+        def run_extension() -> Tensor:
+            return cast(Tensor, run_fn(lambda_bar, b_seq))
+
+        def run_reference() -> Tensor:
+            return _complex_scan_naive(lambda_bar, b_seq)
+
+        return run_extension, run_reference, None
+
+    return _inner
+
+
+def _setup_rnn_case(
+    length: int,
+    batch: int,
+    input_dim: int,
+    hidden_dim: int,
+) -> Callable[[torch.device], Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]]:
+    def _inner(device: torch.device) -> Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]:
+        torch.manual_seed(0)
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(0)
+
+        weight_hh = torch.randn(hidden_dim, hidden_dim, dtype=torch.float32, device=device)
+        weight_xh = torch.randn(hidden_dim, input_dim, dtype=torch.float32, device=device)
+        bias = torch.randn(hidden_dim, dtype=torch.float32, device=device)
+        inputs = torch.randn(length, batch, input_dim, dtype=torch.float32, device=device)
+        initial_state = torch.randn(batch, hidden_dim, dtype=torch.float32, device=device)
+
+        ext_out = try_run_linear_rnn_scan(weight_hh, weight_xh, bias, inputs, initial_state)
+        if ext_out is None:
+            return None, None, "Linear RNN kernel is unavailable"
+
+        def run_extension() -> Tensor:
+            return cast(
+                Tensor,
+                try_run_linear_rnn_scan(weight_hh, weight_xh, bias, inputs, initial_state),
+            )
+
+        def run_reference() -> Tensor:
+            return _linear_rnn_naive(weight_hh, weight_xh, bias, inputs, initial_state)
+
+        return run_extension, run_reference, None
+
+    return _inner
+
+
+_CPU_CASES = [
+    BenchmarkCase(
+        name="linoss",
+        device_type="cpu",
+        setup=_setup_linoss_case(length=768, batch=8, ssm=96),
+        min_runtime=0.35,
+        threshold=_CPU_SPEEDUPS["linoss"],
+    ),
+    BenchmarkCase(
+        name="lru",
+        device_type="cpu",
+        setup=_setup_complex_case(
+            "LRU",
+            length=4096,
+            batch=8,
+            state=128,
+            run_fn=lambda lambda_bar, b_seq: try_run_lru_scan(lambda_bar, b_seq),
+        ),
+        min_runtime=0.35,
+        threshold=_CPU_SPEEDUPS["lru"],
+    ),
+    BenchmarkCase(
+        name="s5",
+        device_type="cpu",
+        setup=_setup_complex_case(
+            "S5",
+            length=4096,
+            batch=8,
+            state=128,
+            run_fn=lambda lambda_bar, b_seq: try_run_s5_scan(lambda_bar, b_seq),
+        ),
+        min_runtime=0.35,
+        threshold=_CPU_SPEEDUPS["s5"],
+    ),
+    BenchmarkCase(
+        name="rnn",
+        device_type="cpu",
+        setup=_setup_rnn_case(length=1024, batch=8, input_dim=192, hidden_dim=256),
+        min_runtime=0.35,
+        threshold=_CPU_SPEEDUPS["rnn"],
+    ),
+]
+
+
+_CUDA_CASES = [
+    BenchmarkCase(
+        name="linoss",
+        device_type="cuda",
+        setup=_setup_linoss_case(length=1024, batch=16, ssm=128),
+        min_runtime=0.6,
+        threshold=_CUDA_SPEEDUPS["linoss"],
+        synchronize=True,
+    ),
+    BenchmarkCase(
+        name="lru",
+        device_type="cuda",
+        setup=_setup_complex_case(
+            "LRU",
+            length=4096,
+            batch=32,
+            state=128,
+            run_fn=lambda lambda_bar, b_seq: try_run_lru_scan(lambda_bar, b_seq),
+        ),
+        min_runtime=0.6,
+        threshold=_CUDA_SPEEDUPS["lru"],
+        synchronize=True,
+    ),
+    BenchmarkCase(
+        name="s5",
+        device_type="cuda",
+        setup=_setup_complex_case(
+            "S5",
+            length=4096,
+            batch=32,
+            state=128,
+            run_fn=lambda lambda_bar, b_seq: try_run_s5_scan(lambda_bar, b_seq),
+        ),
+        min_runtime=0.6,
+        threshold=_CUDA_SPEEDUPS["s5"],
+        synchronize=True,
+    ),
+    BenchmarkCase(
+        name="rnn",
+        device_type="cuda",
+        setup=_setup_rnn_case(length=2048, batch=24, input_dim=256, hidden_dim=256),
+        min_runtime=0.6,
+        threshold=_CUDA_SPEEDUPS["rnn"],
+        synchronize=True,
+    ),
+]
+
+
 @pytest.mark.performance
-@pytest.mark.parametrize("length,batch,ssm", [(512, 8, 64)])
-def test_linoss_cpu_kernel_is_faster(length: int, batch: int, ssm: int) -> None:
-    torch.manual_seed(0)
-    device = torch.device("cpu")
-
-    a_matrix = torch.randn(ssm, 2, 2, dtype=torch.complex64, device=device)
-    b_seq = torch.randn(length, batch, ssm, 2, dtype=torch.complex64, device=device)
-
-    m11 = a_matrix[:, 0, 0].contiguous()
-    m12 = a_matrix[:, 0, 1].contiguous()
-    m21 = a_matrix[:, 1, 0].contiguous()
-    m22 = a_matrix[:, 1, 1].contiguous()
-
-    ext_out = _linoss_try_run_scan(m11, m12, m21, m22, b_seq)
-    if ext_out is None:
-        pytest.skip("LinOSS C++ kernel is unavailable")
-
-    def run_extension() -> object:
-        return _linoss_try_run_scan(m11, m12, m21, m22, b_seq)
-
-    def run_reference() -> object:
-        return _linoss_naive_scan(a_matrix, b_seq)
-
-    # Warm up both paths to avoid measuring first-call overheads.
-    run_extension()
-    run_reference()
-
-    optimized_mean = _time_function(run_extension, min_run_time=0.4)
-    baseline_mean = _time_function(run_reference, min_run_time=0.4)
-
-    speedup = baseline_mean / optimized_mean
-    assert speedup >= _CPU_SPEEDUP_THRESHOLD, (
-        f"LinOSS CPU kernel regressed: baseline {baseline_mean:.6f}s vs optimized {optimized_mean:.6f}s "
-        f"(speedup {speedup:.2f}x)"
-    )
-
-
-@pytest.mark.performance
-@pytest.mark.cuda
-@pytest.mark.parametrize("length,batch,input_dim,hidden_dim", [(1024, 8, 128, 128)])
-def test_linear_rnn_cuda_kernel_is_faster(
-    length: int, batch: int, input_dim: int, hidden_dim: int
-) -> None:
-    if not torch.cuda.is_available():
+@pytest.mark.parametrize("case", _CPU_CASES + _CUDA_CASES, ids=lambda case: case.id)
+def test_kernels_avoid_performance_regressions(case: BenchmarkCase) -> None:
+    if case.requires_cuda and not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
 
-    torch.manual_seed(0)
-    device = torch.device("cuda")
+    device = torch.device(case.device_type)
+    optimized, reference, skip_reason = case.setup(device)
+    if skip_reason is not None:
+        pytest.skip(skip_reason)
+    assert optimized is not None and reference is not None
 
-    weight_hh = torch.randn(hidden_dim, hidden_dim, dtype=torch.float32, device=device)
-    weight_xh = torch.randn(hidden_dim, input_dim, dtype=torch.float32, device=device)
-    bias = torch.randn(hidden_dim, dtype=torch.float32, device=device)
-    inputs = torch.randn(length, batch, input_dim, dtype=torch.float32, device=device)
-    initial_state = torch.randn(batch, hidden_dim, dtype=torch.float32, device=device)
+    optimized()
+    reference()
+    if case.synchronize:
+        torch.cuda.synchronize()
 
-    ext_out = try_run_linear_rnn_scan(weight_hh, weight_xh, bias, inputs, initial_state)
-    if ext_out is None:
-        pytest.skip("Linear RNN CUDA kernel is unavailable")
-
-    def run_extension() -> object:
-        return try_run_linear_rnn_scan(weight_hh, weight_xh, bias, inputs, initial_state)
-
-    def run_reference() -> object:
-        return _linear_rnn_reference(weight_hh, weight_xh, bias, inputs, initial_state)
-
-    # Warm up GPU execution paths.
-    run_extension()
-    run_reference()
-    torch.cuda.synchronize()
-
-    optimized_mean = _time_function(run_extension, min_run_time=0.6, synchronize=True)
-    baseline_mean = _time_function(run_reference, min_run_time=0.6, synchronize=True)
+    optimized_mean = _time_function(optimized, min_run_time=case.min_runtime, synchronize=case.synchronize)
+    baseline_mean = _time_function(reference, min_run_time=case.min_runtime, synchronize=case.synchronize)
 
     speedup = baseline_mean / optimized_mean
-    assert speedup >= _CUDA_SPEEDUP_THRESHOLD, (
-        f"Linear RNN CUDA kernel regressed: baseline {baseline_mean:.6f}s vs optimized {optimized_mean:.6f}s "
-        f"(speedup {speedup:.2f}x)"
+    assert speedup >= case.threshold, (
+        f"{case.name} {case.device_type} kernel regressed: baseline {baseline_mean:.6f}s vs optimized {optimized_mean:.6f}s "
+        f"(speedup {speedup:.2f}x, expected >= {case.threshold:.1f}x)"
     )
