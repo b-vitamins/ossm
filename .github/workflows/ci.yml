@@ -85,7 +85,7 @@ jobs:
             torch_index_url: https://download.pytorch.org/whl/cu126
             build_suffix: cu126
             cuda_home: /usr/local/cuda
-            arch_list: "80;86;89;90"
+            arch_list: "8.0;8.6;8.9;9.0"
     container:
       image: ${{ matrix.container }}
     steps:
