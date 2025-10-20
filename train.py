@@ -4,8 +4,10 @@ import argparse
 import logging
 import sys
 import time
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Deque, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from hydra import compose, initialize  # type: ignore[import]
 from hydra.utils import instantiate, to_absolute_path  # type: ignore[import]
@@ -38,6 +40,19 @@ COLLATE_FNS = {
     "path": path_collate,
 }
 
+AVAILABLE_MODELS = ("linoss_im", "s5", "lru", "ncde", "rnn")
+AVAILABLE_HEADS = ("classification", "regression")
+AVAILABLE_VIEWS = tuple(COLLATE_FNS.keys())
+AVAILABLE_OPTIMIZERS = ("adamw",)
+AVAILABLE_SCHEDULERS = ("none",)
+
+
+@dataclass
+class _RuntimeSettings:
+    cudnn_benchmark: bool = False
+    prefetch_gpu: bool = False
+    prefetch_depth: int = 2
+
 
 def _classification_loss(logits: Tensor, labels: Tensor) -> Tensor:
     num_classes = logits.size(-1)
@@ -59,9 +74,11 @@ class _ProgressReporter:
         self.start_time = time.perf_counter()
         self.last_log_time = self.start_time
         self.interval_examples = 0
+        self.interval_steps = 0
 
     def update(self, batch_size: int) -> None:
         self.interval_examples += int(batch_size)
+        self.interval_steps += 1
 
     def log(
         self,
@@ -77,7 +94,10 @@ class _ProgressReporter:
         remaining = max(self.total_steps - step, 0)
         avg_step = elapsed / max(step, 1)
         eta = avg_step * remaining
-        ips = self.interval_examples / interval if self.interval_examples else 0.0
+        throughput = (
+            self.interval_examples / interval if self.interval_examples else 0.0
+        )
+        step_time = interval / max(self.interval_steps, 1)
 
         parts = [f"Step {step:05d}/{self.total_steps:05d}", f"Loss = {loss:.4f}"]
         if metrics:
@@ -85,13 +105,15 @@ class _ProgressReporter:
                 parts.append(f"{name} = {value:.4f}")
         if lr is not None:
             parts.append(f"LR = {lr:.2e}")
-        parts.append(f"IPS = {ips:,.1f}")
+        parts.append(f"Samples/s = {throughput:,.1f}")
+        parts.append(f"Step time = {step_time * 1e3:.1f} ms")
         parts.append(f"Time = {_format_duration(elapsed)}")
         parts.append(f"ETA = {_format_duration(eta)}")
         print(" \u2022 ".join(parts))
 
         self.last_log_time = now
         self.interval_examples = 0
+        self.interval_steps = 0
 
     def summary(self) -> None:
         elapsed = time.perf_counter() - self.start_time
@@ -102,13 +124,22 @@ def _build_dataloader(cfg: DictConfig, dataset, *, shuffle: Optional[bool] = Non
     if collate_name not in COLLATE_FNS:
         raise ValueError(f"Unknown collate function '{collate_name}'.")
     collate_fn = COLLATE_FNS[collate_name]
+    kwargs = {
+        "batch_size": cfg.batch_size,
+        "shuffle": cfg.get("shuffle", True) if shuffle is None else shuffle,
+        "num_workers": cfg.get("num_workers", 0),
+        "pin_memory": cfg.get("pin_memory", False),
+        "persistent_workers": cfg.get("persistent_workers", False),
+        "drop_last": cfg.get("drop_last", False),
+        "collate_fn": collate_fn,
+    }
+    if cfg.get("prefetch_factor") is not None:
+        kwargs["prefetch_factor"] = int(cfg.prefetch_factor)
+    if cfg.get("pin_memory_device"):
+        kwargs["pin_memory_device"] = str(cfg.pin_memory_device)
     return DataLoader(
         dataset,
-        batch_size=cfg.batch_size,
-        shuffle=cfg.get("shuffle", True) if shuffle is None else shuffle,
-        num_workers=cfg.get("num_workers", 0),
-        pin_memory=cfg.get("pin_memory", False),
-        collate_fn=collate_fn,
+        **kwargs,
     )
 
 
@@ -277,11 +308,69 @@ def _build_head(head_cfg: DictConfig, hidden_dim: int, num_outputs: int) -> nn.M
     raise ValueError(f"Unsupported head '{head_cfg.name}'.")
 
 
-def _move_batch(batch: Dict[str, Tensor], device: torch.device) -> Dict[str, Tensor]:
-    return {
-        key: value.to(device) if isinstance(value, Tensor) else value
-        for key, value in batch.items()
-    }
+def _move_batch(
+    batch: Dict[str, Tensor], device: torch.device, *, non_blocking: bool = False
+) -> Dict[str, Tensor]:
+    moved: Dict[str, Tensor] = {}
+    for key, value in batch.items():
+        if isinstance(value, Tensor):
+            if value.device == device:
+                moved[key] = value
+            else:
+                moved[key] = value.to(device, non_blocking=non_blocking)
+        else:
+            moved[key] = value
+    return moved
+
+
+class _CudaPrefetcher:
+    def __init__(
+        self,
+        loader: Iterable[Dict[str, Tensor]],
+        device: torch.device,
+        *,
+        depth: int,
+    ) -> None:
+        if device.type != "cuda":
+            raise ValueError("CUDA prefetcher requires a CUDA device")
+        self.loader = loader
+        self.device = device
+        self.depth = max(int(depth), 1)
+        self.stream = torch.cuda.Stream(device=device)
+        self.buffer: Deque[Dict[str, Tensor]] = deque()
+        self.iterator = iter(loader)
+        self._warmup()
+
+    def _fetch_next(self) -> Optional[Dict[str, Tensor]]:
+        try:
+            batch = next(self.iterator)
+        except StopIteration:
+            self.iterator = iter(self.loader)
+            try:
+                batch = next(self.iterator)
+            except StopIteration:
+                return None
+        with torch.cuda.stream(self.stream):
+            return _move_batch(batch, self.device, non_blocking=True)
+
+    def _warmup(self) -> None:
+        while len(self.buffer) < self.depth:
+            batch = self._fetch_next()
+            if batch is None:
+                break
+            self.buffer.append(batch)
+
+    def next(self) -> Dict[str, Tensor]:
+        if not self.buffer:
+            self._warmup()
+            if not self.buffer:
+                raise RuntimeError("CUDA prefetcher did not receive any batches")
+        torch.cuda.current_stream().wait_stream(self.stream)
+        batch = self.buffer.popleft()
+        next_batch = self._fetch_next()
+        if next_batch is not None:
+            self.buffer.append(next_batch)
+        return batch
 
 
 def _run_backbone(backbone: Backbone, batch: Dict[str, Tensor]) -> SequenceBackboneOutput:
@@ -317,8 +406,9 @@ def _training_step(
     *,
     device: torch.device,
     classification: bool,
+    non_blocking: bool,
 ) -> Tuple[Tensor, Tensor, Tensor]:
-    batch = _move_batch(batch, device)
+    batch = _move_batch(batch, device, non_blocking=non_blocking)
     labels = batch["label"]
     backbone_out = _run_backbone(backbone, batch)
     if classification:
@@ -337,6 +427,7 @@ def _evaluate_split(
     *,
     device: torch.device,
     classification: bool,
+    non_blocking: bool,
 ) -> Tuple[float, Optional[float]]:
     backbone.eval()
     head.eval()
@@ -346,7 +437,12 @@ def _evaluate_split(
     with torch.no_grad():
         for batch in loader:
             loss, outputs, labels = _training_step(
-                backbone, head, batch, device=device, classification=classification
+                backbone,
+                head,
+                batch,
+                device=device,
+                classification=classification,
+                non_blocking=non_blocking,
             )
             batch_size = labels.size(0)
             total_loss += float(loss.item()) * batch_size
@@ -370,75 +466,412 @@ def _format_eval(split: str, loss: float, accuracy: Optional[float]) -> str:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace, List[str]]:
-    parser = argparse.ArgumentParser(description="Train OSSM models")
-    parser.add_argument("--model", default="linoss_im", help="Model configuration name")
-    parser.add_argument("--dataset", default="EthanolConcentration", help="Dataset name")
-    parser.add_argument("--dataset-view", default="raw", help="Dataset view")
-    parser.add_argument("--validation-dataset", default=None, help="Validation dataset name")
-    parser.add_argument("--validation-view", default=None, help="Validation dataset view")
-    parser.add_argument("--test-dataset", default=None, help="Test dataset name")
-    parser.add_argument("--test-view", default=None, help="Test dataset view")
-    parser.add_argument("--batch-size", type=int, default=None, help="Training batch size")
-    parser.add_argument("--max-steps", type=int, default=None, help="Number of training steps")
-    parser.add_argument("--log-interval", type=int, default=None, help="Logging interval (steps)")
-    parser.add_argument("--eval-interval", type=int, default=None, help="Evaluation interval (steps)")
-    parser.add_argument("--lr", type=float, default=None, help="Learning rate override")
-    parser.add_argument("--weight-decay", type=float, default=None, help="Weight decay override")
-    parser.add_argument("--grad-clip", type=float, default=None, help="Gradient clipping value")
-    parser.add_argument("--hidden-dim", type=int, default=None, help="Backbone hidden dimension")
-    parser.add_argument("--ssm-size", type=int, default=None, help="State-space dimension")
-    parser.add_argument("--num-blocks", type=int, default=None, help="Number of backbone blocks")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed")
-    parser.add_argument("--device", default="auto", help="Device to use (e.g. 'cpu', 'cuda', 'auto')")
-    parser.add_argument("--data-root", default=None, help="Dataset root directory")
-    parser.add_argument("--collate", default=None, help="Dataloader collate function")
+    parser = argparse.ArgumentParser(
+        description="Train OSSM models",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    model_group = parser.add_argument_group("Model and task")
+    model_group.add_argument(
+        "--model",
+        "--backbone",
+        dest="model",
+        default="linoss_im",
+        choices=AVAILABLE_MODELS,
+        help="Backbone preset from configs/model.",
+    )
+    model_group.add_argument(
+        "--head",
+        default="classification",
+        choices=AVAILABLE_HEADS,
+        help="Prediction head preset.",
+    )
+    model_group.add_argument(
+        "--task",
+        default=None,
+        choices=AVAILABLE_HEADS,
+        help="Training objective; defaults to the selected head.",
+    )
+    model_group.add_argument(
+        "--hidden-dim",
+        type=int,
+        default=None,
+        help="Override the backbone hidden dimension.",
+    )
+    model_group.add_argument(
+        "--ssm-size",
+        type=int,
+        default=None,
+        help="Override the state-space dimension for SSM backbones.",
+    )
+    model_group.add_argument(
+        "--num-blocks",
+        type=int,
+        default=None,
+        help="Override the number of backbone blocks.",
+    )
+
+    data_group = parser.add_argument_group("Dataset")
+    data_group.add_argument(
+        "--dataset-name",
+        default="EthanolConcentration",
+        help="UEA dataset name.",
+    )
+    data_group.add_argument(
+        "--dataset-view",
+        default="coeff",
+        choices=AVAILABLE_VIEWS,
+        help="Dataset representation to materialise.",
+    )
+    data_group.add_argument(
+        "--dataset-root",
+        default=None,
+        help="Override the dataset root directory.",
+    )
+    data_group.add_argument(
+        "--train-split",
+        default="train",
+        help="Split to use for the training dataset.",
+    )
+    data_group.add_argument(
+        "--val-name",
+        default=None,
+        help="Optional validation dataset name (defaults to training dataset).",
+    )
+    data_group.add_argument(
+        "--val-view",
+        default=None,
+        help="Optional validation dataset view (defaults to training view).",
+    )
+    data_group.add_argument(
+        "--val-split",
+        default="val",
+        help="Split to use for the validation dataset.",
+    )
+    data_group.add_argument(
+        "--test-name",
+        default=None,
+        help="Optional test dataset name (defaults to validation dataset).",
+    )
+    data_group.add_argument(
+        "--test-view",
+        default=None,
+        help="Optional test dataset view (defaults to validation view).",
+    )
+    data_group.add_argument(
+        "--test-split",
+        default="test",
+        help="Split to use for the test dataset.",
+    )
+    data_group.add_argument(
+        "--window-steps",
+        type=int,
+        default=None,
+        help="Number of windows for log-signature features (view='path').",
+    )
+    data_group.add_argument(
+        "--window-depth",
+        type=int,
+        default=None,
+        help="Log-signature depth (view='path').",
+    )
+    data_group.add_argument(
+        "--logsig-basis",
+        default=None,
+        help="Log-signature basis for path view ('hall' or 'lyndon').",
+    )
+    data_group.add_argument(
+        "--record-grid",
+        action="store_true",
+        help="Persist the original time grid in each sample.",
+    )
+    data_group.add_argument(
+        "--record-source",
+        action="store_true",
+        help="Persist source index metadata in each sample.",
+    )
+    data_group.add_argument(
+        "--download",
+        action="store_true",
+        help="Download and prepare the dataset layout if missing.",
+    )
+
+    loader_group = parser.add_argument_group("Dataloader")
+    loader_group.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Override the training batch size.",
+    )
+    loader_group.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Number of worker processes.",
+    )
+    loader_group.add_argument(
+        "--prefetch-factor",
+        type=int,
+        default=None,
+        help="Number of batches loaded in advance per worker.",
+    )
+    loader_group.add_argument(
+        "--persistent-workers",
+        action="store_true",
+        help="Keep dataloader workers alive between epochs.",
+    )
+    loader_group.add_argument(
+        "--pin-memory",
+        action="store_true",
+        help="Pin dataloader memory for faster host-to-device transfers.",
+    )
+    loader_group.add_argument(
+        "--pin-memory-device",
+        default=None,
+        help="Device for pinned memory (PyTorch >= 2.1).",
+    )
+    loader_group.add_argument(
+        "--drop-last",
+        action="store_true",
+        help="Drop the last incomplete batch.",
+    )
+    loader_group.add_argument(
+        "--collate",
+        choices=tuple(COLLATE_FNS.keys()),
+        default=None,
+        help="Collate function to use for batching.",
+    )
+
+    optim_group = parser.add_argument_group("Optimisation")
+    optim_group.add_argument(
+        "--optimizer",
+        default="adamw",
+        choices=AVAILABLE_OPTIMIZERS,
+        help="Optimizer preset.",
+    )
+    optim_group.add_argument(
+        "--scheduler",
+        default="none",
+        choices=AVAILABLE_SCHEDULERS,
+        help="Scheduler preset.",
+    )
+    optim_group.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="Override the learning rate.",
+    )
+    optim_group.add_argument(
+        "--weight-decay",
+        type=float,
+        default=None,
+        help="Override the weight decay coefficient.",
+    )
+    optim_group.add_argument(
+        "--grad-clip",
+        type=float,
+        default=None,
+        help="Gradient clipping value.",
+    )
+
+    train_group = parser.add_argument_group("Training schedule")
+    train_group.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Maximum number of optimisation steps.",
+    )
+    train_group.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Optional epoch budget (converted to steps using the dataloader length).",
+    )
+    train_group.add_argument(
+        "--log-interval",
+        type=int,
+        default=None,
+        help="Logging interval in steps.",
+    )
+    train_group.add_argument(
+        "--eval-interval",
+        type=int,
+        default=None,
+        help="Evaluation interval in steps.",
+    )
+    train_group.add_argument(
+        "--prefetch-gpu",
+        action="store_true",
+        help="Stream batches to GPU using a background CUDA stream.",
+    )
+    train_group.add_argument(
+        "--prefetch-depth",
+        type=int,
+        default=2,
+        help="Number of batches prepared ahead of time for GPU prefetching.",
+    )
+    train_group.add_argument(
+        "--cudnn-benchmark",
+        action="store_true",
+        help="Enable cuDNN benchmark autotuning (GPU only).",
+    )
+
+    runtime_group = parser.add_argument_group("Runtime")
+    runtime_group.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed for PyTorch and CUDA.",
+    )
+    runtime_group.add_argument(
+        "--device",
+        default="auto",
+        help="Device to use (e.g. 'cpu', 'cuda', 'cuda:1', or 'auto').",
+    )
+    runtime_group.add_argument(
+        "--work-dir",
+        default=None,
+        help="Override the Hydra work directory (paths.work_dir).",
+    )
+
     args, unknown = parser.parse_known_args(argv)
     return args, unknown
 
 
 def _compose_config(args: argparse.Namespace, extra_overrides: Sequence[str]) -> DictConfig:
+    task = args.task or args.head
     overrides: List[str] = [
         f"model={args.model}",
-        f"dataset.name={args.dataset}",
+        f"head={args.head}",
+        f"optimizer={args.optimizer}",
+        f"scheduler={args.scheduler}",
+        f"training={task}",
+        f"dataset.name={args.dataset_name}",
         f"dataset.view={args.dataset_view}",
+        f"dataset.split={args.train_split}",
     ]
 
-    val_dataset = args.validation_dataset or args.dataset
-    val_view = args.validation_view or args.dataset_view
+    val_name = args.val_name or args.dataset_name
+    val_view = args.val_view or args.dataset_view
     overrides.extend(
-        [f"validation_dataset.name={val_dataset}", f"validation_dataset.view={val_view}"]
+        [
+            f"validation_dataset.name={val_name}",
+            f"validation_dataset.view={val_view}",
+            f"validation_dataset.split={args.val_split}",
+        ]
     )
 
-    test_dataset = args.test_dataset or val_dataset
+    test_name = args.test_name or val_name
     test_view = args.test_view or val_view
     overrides.extend(
-        [f"test_dataset.name={test_dataset}", f"test_dataset.view={test_view}"]
+        [
+            f"test_dataset.name={test_name}",
+            f"test_dataset.view={test_view}",
+            f"test_dataset.split={args.test_split}",
+        ]
     )
 
-    if args.data_root:
-        overrides.append(f"paths.data_root={args.data_root}")
+    if args.dataset_root:
+        overrides.append(f"paths.data_root={args.dataset_root}")
+    if args.work_dir:
+        overrides.append(f"paths.work_dir={args.work_dir}")
+
     if args.collate:
         overrides.append(f"dataloader.collate={args.collate}")
     if args.batch_size is not None:
         overrides.append(f"dataloader.batch_size={args.batch_size}")
+    if args.num_workers is not None:
+        overrides.append(f"dataloader.num_workers={args.num_workers}")
+    if args.prefetch_factor is not None:
+        overrides.append(f"dataloader.prefetch_factor={args.prefetch_factor}")
+    if args.persistent_workers:
+        overrides.append("dataloader.persistent_workers=true")
+    if args.pin_memory:
+        overrides.append("dataloader.pin_memory=true")
+    if args.pin_memory_device:
+        overrides.append(f"dataloader.pin_memory_device={args.pin_memory_device}")
+    if args.drop_last:
+        overrides.append("dataloader.drop_last=true")
+
     if args.max_steps is not None:
         overrides.append(f"training.max_steps={args.max_steps}")
+    if args.epochs is not None:
+        overrides.append(f"training.epochs={args.epochs}")
     if args.log_interval is not None:
         overrides.append(f"training.log_interval={args.log_interval}")
     if args.eval_interval is not None:
         overrides.append(f"training.eval_interval={args.eval_interval}")
+    if args.grad_clip is not None:
+        overrides.append(f"training.grad_clip={args.grad_clip}")
+    if args.prefetch_gpu:
+        overrides.append("training.prefetch_gpu=true")
+        overrides.append(f"training.prefetch_depth={args.prefetch_depth}")
+        overrides.append("dataloader.pin_memory=true")
+    elif args.prefetch_depth is not None:
+        overrides.append(f"training.prefetch_depth={args.prefetch_depth}")
+    if args.cudnn_benchmark:
+        overrides.append("training.cudnn_benchmark=true")
+
     if args.lr is not None:
         overrides.append(f"optimizer.lr={args.lr}")
     if args.weight_decay is not None:
         overrides.append(f"optimizer.weight_decay={args.weight_decay}")
-    if args.grad_clip is not None:
-        overrides.append(f"training.grad_clip={args.grad_clip}")
+
     if args.hidden_dim is not None:
         overrides.append(f"model.params.hidden_dim={args.hidden_dim}")
     if args.ssm_size is not None:
         overrides.append(f"model.params.ssm_size={args.ssm_size}")
     if args.num_blocks is not None:
         overrides.append(f"model.params.num_blocks={args.num_blocks}")
+
+    if args.window_steps is not None:
+        overrides.extend(
+            [
+                f"dataset.steps={args.window_steps}",
+                f"validation_dataset.steps={args.window_steps}",
+                f"test_dataset.steps={args.window_steps}",
+            ]
+        )
+    if args.window_depth is not None:
+        overrides.extend(
+            [
+                f"dataset.depth={args.window_depth}",
+                f"validation_dataset.depth={args.window_depth}",
+                f"test_dataset.depth={args.window_depth}",
+            ]
+        )
+    if args.logsig_basis is not None:
+        overrides.extend(
+            [
+                f"dataset.basis={args.logsig_basis}",
+                f"validation_dataset.basis={args.logsig_basis}",
+                f"test_dataset.basis={args.logsig_basis}",
+            ]
+        )
+    if args.record_grid:
+        overrides.extend(
+            [
+                "dataset.record_grid=true",
+                "validation_dataset.record_grid=true",
+                "test_dataset.record_grid=true",
+            ]
+        )
+    if args.record_source:
+        overrides.extend(
+            [
+                "dataset.record_source=true",
+                "validation_dataset.record_source=true",
+                "test_dataset.record_source=true",
+            ]
+        )
+    if args.download:
+        overrides.extend(
+            [
+                "dataset.download=true",
+                "validation_dataset.download=true",
+                "test_dataset.download=true",
+            ]
+        )
 
     overrides.extend(
         [
@@ -462,13 +895,16 @@ def _select_device(requested: str) -> torch.device:
     return torch.device(requested)
 
 
-def run_training(cfg: DictConfig, device: torch.device) -> None:
+def run_training(cfg: DictConfig, device: torch.device, runtime: _RuntimeSettings) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     seed = int(cfg.seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+    if runtime.cudnn_benchmark and torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True  # type: ignore[attr-defined]
 
     train_root = to_absolute_path(cfg.dataset.root)
     val_root = to_absolute_path(cfg.validation_dataset.root)
@@ -500,35 +936,69 @@ def run_training(cfg: DictConfig, device: torch.device) -> None:
     if cfg.scheduler.get("enabled", False):
         scheduler = instantiate(cfg.scheduler, optimizer=optimizer)
 
+    runtime.prefetch_gpu = runtime.prefetch_gpu and device.type == "cuda" and torch.cuda.is_available()
+    non_blocking = device.type == "cuda" and (
+        runtime.prefetch_gpu or bool(cfg.dataloader.get("pin_memory", False))
+    )
     max_steps = int(cfg.training.max_steps)
     log_interval = int(cfg.training.log_interval)
     eval_interval = int(cfg.training.eval_interval)
     grad_clip = cfg.training.get("grad_clip")
 
-    progress = _ProgressReporter(max_steps)
-    device_label = device.type if device.index is None else f"{device.type}:{device.index}"
     try:
         batches_per_epoch = len(train_loader)
     except TypeError:  # pragma: no cover - dataloader without __len__
-        batches_per_epoch = "?"
+        batches_per_epoch = None
+    epochs = cfg.training.get("epochs")
+    if epochs is not None:
+        if not isinstance(batches_per_epoch, int):
+            raise ValueError("Cannot derive steps from epochs without a sized dataloader")
+        max_steps = int(epochs) * batches_per_epoch
+    progress = _ProgressReporter(max_steps)
+
+    device_label = device.type if device.index is None else f"{device.type}:{device.index}"
+    batches_display = batches_per_epoch if batches_per_epoch is not None else "?"
+    extras = []
+    if runtime.prefetch_gpu:
+        extras.append(f"prefetch_gpu(depth={runtime.prefetch_depth})")
+    extras_str = f" {' '.join(extras)}" if extras else ""
     print(
-        f"Training • steps={max_steps:,} device={device_label} batches/epoch={batches_per_epoch}"
+        "Training • "
+        f"task={'classification' if classification else 'regression'} "
+        f"steps={max_steps:,} "
+        f"device={device_label} "
+        f"batch_size={cfg.dataloader.batch_size} "
+        f"batches/epoch={batches_display} "
+        f"train_samples={len(train_dataset)}" + extras_str
     )
 
     step = 0
     train_iter = iter(train_loader)
+    prefetcher: Optional[_CudaPrefetcher] = None
+    if runtime.prefetch_gpu:
+        prefetcher = _CudaPrefetcher(train_loader, device, depth=runtime.prefetch_depth)
+        train_iter = None  # type: ignore[assignment]
     last_eval: Dict[str, Tuple[float, Optional[float]]] = {}
 
     while step < max_steps:
-        try:
-            batch = next(train_iter)
-        except StopIteration:
-            train_iter = iter(train_loader)
-            batch = next(train_iter)
+        if runtime.prefetch_gpu and prefetcher is not None:
+            batch = prefetcher.next()
+        else:
+            assert train_iter is not None
+            try:
+                batch = next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_loader)
+                batch = next(train_iter)
 
         optimizer.zero_grad(set_to_none=True)
         loss, outputs, labels = _training_step(
-            backbone, head, batch, device=device, classification=classification
+            backbone,
+            head,
+            batch,
+            device=device,
+            classification=classification,
+            non_blocking=non_blocking,
         )
         loss.backward()
         if grad_clip is not None:
@@ -555,13 +1025,23 @@ def run_training(cfg: DictConfig, device: torch.device) -> None:
 
         if step % eval_interval == 0 or step == max_steps:
             val_loss, val_acc = _evaluate_split(
-                backbone, head, val_loader, device=device, classification=classification
+                backbone,
+                head,
+                val_loader,
+                device=device,
+                classification=classification,
+                non_blocking=non_blocking,
             )
             last_eval["val"] = (val_loss, val_acc)
             print(f"Eval step {step:05d} • {_format_eval('val', val_loss, val_acc)}")
             if test_loader is not None:
                 test_loss, test_acc = _evaluate_split(
-                    backbone, head, test_loader, device=device, classification=classification
+                    backbone,
+                    head,
+                    test_loader,
+                    device=device,
+                    classification=classification,
+                    non_blocking=non_blocking,
                 )
                 last_eval["test"] = (test_loss, test_acc)
                 print(f"Eval step {step:05d} • {_format_eval('test', test_loss, test_acc)}")
@@ -587,7 +1067,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args, extra = parse_args(argv)
     cfg = _compose_config(args, extra)
     device = _select_device(args.device)
-    run_training(cfg, device)
+    runtime = _RuntimeSettings(
+        cudnn_benchmark=bool(cfg.training.get("cudnn_benchmark", False)),
+        prefetch_gpu=bool(cfg.training.get("prefetch_gpu", False)),
+        prefetch_depth=int(cfg.training.get("prefetch_depth", 2)),
+    )
+    run_training(cfg, device, runtime)
 
 
 if __name__ == "__main__":
