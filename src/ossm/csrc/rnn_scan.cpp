@@ -1,8 +1,8 @@
 #include <ATen/TensorUtils.h>
-#include <torch/extension.h>
 #include <vector>
-#include <utility>
+#include <torch/extension.h>
 
+namespace ossm {
 namespace {
 
 at::Tensor linear_rnn_scan_cpu(const at::Tensor& weight_hh,
@@ -43,6 +43,7 @@ at::Tensor linear_rnn_scan_cpu(const at::Tensor& weight_hh,
 
   auto weight_hh_contig = weight_hh.contiguous();
   auto weight_hh_t = weight_hh_contig.transpose(0, 1).contiguous();
+  (void)weight_hh_t;  // avoid unused warning in CPU path
   auto weight_xh_t = weight_xh.contiguous().transpose(0, 1).contiguous();
   auto bias_contig = bias.contiguous();
   auto inputs_contig = inputs.contiguous();
@@ -66,8 +67,6 @@ at::Tensor linear_rnn_scan_cpu(const at::Tensor& weight_hh,
   return at::stack(steps, 0);
 }
 
-}  // namespace
-
 #ifdef WITH_CUDA
 at::Tensor linear_rnn_scan_cuda(const at::Tensor& weight_hh,
                                 const at::Tensor& weight_xh,
@@ -75,6 +74,8 @@ at::Tensor linear_rnn_scan_cuda(const at::Tensor& weight_hh,
                                 const at::Tensor& inputs,
                                 const at::Tensor& initial_state);
 #endif
+
+}  // namespace
 
 at::Tensor linear_rnn_scan(const at::Tensor& weight_hh,
                            const at::Tensor& weight_xh,
@@ -96,6 +97,4 @@ at::Tensor linear_rnn_scan(const at::Tensor& weight_hh,
   return linear_rnn_scan_cpu(weight_hh, weight_xh, bias, inputs, initial_state);
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("linear_rnn_scan", &linear_rnn_scan, "Linear RNN scan kernel");
-}
+}  // namespace ossm

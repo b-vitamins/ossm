@@ -2,56 +2,43 @@
 
 from __future__ import annotations
 
-import hashlib
-import pathlib
-from types import ModuleType
+import os
 from typing import Optional
 
 import torch
 from torch import Tensor
-from torch.utils.cpp_extension import CUDA_HOME, load as load_extension
 
-__all__ = ["try_run_scan"]
+__all__ = ["try_run_scan", "is_available", "extension_error"]
 
-_EXTENSION: Optional[ModuleType] = None
-_EXTENSION_ERROR: Optional[Exception] = None
+try:
+    from ossm import _kernels as _kernels  # type: ignore[attr-defined]
+except ImportError as exc:  # pragma: no cover - build-time failure surface
+    _kernels = None
+    _EXTENSION_ERROR: Optional[Exception] = exc
+else:
+    _EXTENSION_ERROR = None
 
 
-def _load_extension() -> Optional[ModuleType]:
-    global _EXTENSION, _EXTENSION_ERROR
-    if _EXTENSION is not None or _EXTENSION_ERROR is not None:
-        return _EXTENSION
+def _trace(message: str) -> None:
+    if os.environ.get("OSSM_LINOSS_TRACE"):
+        print(message, flush=True)
 
-    base = pathlib.Path(__file__).with_name("_linoss_scan.cpp")
-    cuda_source = base.with_name("_linoss_scan_cuda.cu")
 
-    sources = [str(base)]
-    extra_cuda_cflags = None
-    with_cuda = False
-    if CUDA_HOME is not None and torch.cuda.is_available() and cuda_source.exists():
-        sources.append(str(cuda_source))
-        extra_cuda_cflags = ["-O3"]
-        with_cuda = True
+if _kernels is not None and os.environ.get("OSSM_LINOSS_TRACE"):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    _trace(f"[OSSM] Using LinOSS C++ extension (device={device}).")
 
-    hasher = hashlib.md5()
-    for src in sources:
-        hasher.update(pathlib.Path(src).read_bytes())
-    hasher.update("-O3-ffast-math-march=native".encode())
-    digest = hasher.hexdigest()
 
-    try:
-        _EXTENSION = load_extension(
-            name=f"ossm_linoss_scan_{digest}",
-            sources=sources,
-            extra_cflags=["-O3", "-ffast-math", "-march=native"],
-            extra_cuda_cflags=extra_cuda_cflags,
-            with_cuda=with_cuda,
-            verbose=False,
-        )
-    except (OSError, RuntimeError) as exc:
-        _EXTENSION_ERROR = exc
-        _EXTENSION = None
-    return _EXTENSION
+def is_available() -> bool:
+    """Return ``True`` when the compiled LinOSS kernels are importable."""
+
+    return _kernels is not None
+
+
+def extension_error() -> Optional[Exception]:
+    """Return the cached import/build error, if any."""
+
+    return _EXTENSION_ERROR
 
 
 def try_run_scan(
@@ -65,7 +52,12 @@ def try_run_scan(
 
     if b_seq.numel() == 0:
         return b_seq
-    extension = _load_extension()
-    if extension is None:
+    if _kernels is None:
         return None
-    return extension.linoss_scan(m11, m12, m21, m22, b_seq)
+    try:
+        return _kernels.linoss_scan(m11, m12, m21, m22, b_seq)
+    except RuntimeError as exc:  # pragma: no cover - runtime device mismatch
+        global _EXTENSION_ERROR
+        _EXTENSION_ERROR = exc
+        _trace(f"[OSSM] LinOSS extension call failed: {exc}")
+        return None

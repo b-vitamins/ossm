@@ -11,4 +11,9 @@
    "python-pytest"
    "python-ruff"
    "node-pyright"
+   "cuda-toolkit"
+   "gcc-toolchain@14"
+   "ninja"
+   "cmake"
+   "pybind11"
    ))

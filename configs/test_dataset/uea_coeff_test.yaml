@@ -1,7 +1,7 @@
 _target_: ossm.data.datasets.UEA
 root: ${paths.data_root}
 name: EthanolConcentration
-split: val
+split: test
 view: coeff
 steps: 32
 depth: 2

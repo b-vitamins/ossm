@@ -3,6 +3,7 @@
 #include <c10/util/complex.h>
 #include <torch/extension.h>
 
+namespace ossm {
 namespace {
 
 template <typename scalar_t>
@@ -88,13 +89,13 @@ at::Tensor lru_scan_cpu(const at::Tensor& lambda_real,
   return result;
 }
 
-}  // namespace
-
 #ifdef WITH_CUDA
 at::Tensor lru_scan_cuda(const at::Tensor& lambda_real,
                          const at::Tensor& lambda_imag,
                          const at::Tensor& b_seq);
 #endif
+
+}  // namespace
 
 at::Tensor lru_scan(const at::Tensor& lambda_real,
                     const at::Tensor& lambda_imag,
@@ -118,7 +119,4 @@ at::Tensor lru_scan(const at::Tensor& lambda_real,
   return lru_scan_cpu(lambda_real, lambda_imag, b_seq);
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("lru_scan", &lru_scan, "LRU associative scan kernel");
-}
-
+}  // namespace ossm
