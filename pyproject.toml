@@ -33,6 +33,10 @@ linoss = [
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+markers = [
+  "performance: marks a benchmark-style regression guard",
+  "cuda: denotes tests that require a CUDA-capable device",
+]
 
 [tool.pyright]
 # Keep pyright focused on library code; tests may use patterns pyright dislikes.
