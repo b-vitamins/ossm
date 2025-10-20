@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install poetry-core
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --no-build-isolation -e .[uea,signature]
+          python -m pip install ruff pyright
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Pyright type check
+        run: pyright
+
+      - name: Run tests
+        run: pytest
+
+  build-core-wheel:
+    name: Build core wheel
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build backend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Upload OSSM distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ossm-core-dist
+          path: dist/*
+
+  build-kernels:
+    name: Build kernels (${{ matrix.flavor }})
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: cpu
+            container: pytorch/pytorch:2.2.2-cpu-py3.11
+            torch-index-url: https://download.pytorch.org/whl/cpu
+            build-suffix: cpu
+            cuda-home: ""
+            arch-list: ""
+          - flavor: cu121
+            container: pytorch/pytorch:2.2.2-cuda12.1-cudnn8-devel
+            torch-index-url: https://download.pytorch.org/whl/cu121
+            build-suffix: cu121
+            cuda-home: /usr/local/cuda
+            arch-list: "80;86;89;90"
+    container:
+      image: ${{ matrix.container }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure build metadata
+        run: echo "OSSM_BUILD_SUFFIX=${{ matrix.build-suffix }}" >> "$GITHUB_ENV"
+
+      - name: Configure CUDA toolchain
+        if: ${{ matrix.cuda-home != '' }}
+        run: |
+          echo "CUDA_HOME=${{ matrix.cuda-home }}" >> "$GITHUB_ENV"
+          echo "TORCH_CUDA_ARCH_LIST=${{ matrix.arch-list }}" >> "$GITHUB_ENV"
+
+      - name: Bootstrap build environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade build wheel ninja
+
+      - name: Install PyTorch wheel
+        run: python -m pip install --upgrade torch --index-url ${{ matrix.torch-index-url }}
+
+      - name: Ensure PyTorch is available
+        run: |
+          python - <<'PY'
+import importlib.util, sys
+
+if importlib.util.find_spec("torch") is None:
+    raise SystemExit("PyTorch is required to build the ossm kernels extension")
+PY
+
+      - name: Build kernels wheel
+        run: |
+          rm -rf build dist
+          python setup.py clean || true
+          python setup.py bdist_wheel
+
+      - name: Upload kernels wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ossm-kernels-${{ matrix.flavor }}
+          path: dist/*.whl
