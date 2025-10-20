@@ -76,16 +76,16 @@ jobs:
         include:
           - flavor: cpu
             container: pytorch/pytorch:2.8.0-cpu-py3.11
-            torch-index-url: https://download.pytorch.org/whl/cpu
-            build-suffix: cpu
-            cuda-home: ""
-            arch-list: ""
+            torch_index_url: https://download.pytorch.org/whl/cpu
+            build_suffix: cpu
+            cuda_home: ""
+            arch_list: ""
           - flavor: cu121
             container: pytorch/pytorch:2.8.0-cuda12.1-cudnn9-devel
-            torch-index-url: https://download.pytorch.org/whl/cu121
-            build-suffix: cu121
-            cuda-home: /usr/local/cuda
-            arch-list: "80;86;89;90"
+            torch_index_url: https://download.pytorch.org/whl/cu121
+            build_suffix: cu121
+            cuda_home: /usr/local/cuda
+            arch_list: "80;86;89;90"
     container:
       image: ${{ matrix.container }}
     steps:
@@ -93,13 +93,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure build metadata
-        run: echo "OSSM_BUILD_SUFFIX=${{ matrix.build-suffix }}" >> "$GITHUB_ENV"
+        run: echo "OSSM_BUILD_SUFFIX=${{ matrix.build_suffix }}" >> "$GITHUB_ENV"
 
       - name: Configure CUDA toolchain
-        if: ${{ matrix.cuda-home != '' }}
+        if: ${{ matrix.cuda_home != '' }}
         run: |
-          echo "CUDA_HOME=${{ matrix.cuda-home }}" >> "$GITHUB_ENV"
-          echo "TORCH_CUDA_ARCH_LIST=${{ matrix.arch-list }}" >> "$GITHUB_ENV"
+          echo "CUDA_HOME=${{ matrix.cuda_home }}" >> "$GITHUB_ENV"
+          echo "TORCH_CUDA_ARCH_LIST=${{ matrix.arch_list }}" >> "$GITHUB_ENV"
 
       - name: Bootstrap build environment
         run: |
@@ -107,7 +107,7 @@ jobs:
           python -m pip install --upgrade build wheel ninja
 
       - name: Install PyTorch wheel
-        run: python -m pip install --upgrade torch==2.8.0 --index-url ${{ matrix.torch-index-url }}
+        run: python -m pip install --upgrade torch==2.8.0 --index-url ${{ matrix.torch_index_url }}
 
       - name: Ensure PyTorch is available
         run: |
