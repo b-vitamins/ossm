@@ -25,28 +25,24 @@ at::Tensor linear_rnn_scan_cuda_impl(const at::Tensor& weight_hh,
   const auto batch = inputs.size(1);
   const auto hidden_size = weight_hh.size(0);
 
-  auto weight_hh_contig = weight_hh.contiguous();
-  auto weight_xh_t = weight_xh.contiguous().transpose(0, 1).contiguous();
-  auto bias_contig = bias.contiguous();
-  auto inputs_contig = inputs.contiguous();
-  auto inputs_flat = inputs_contig.reshape({length * batch, weight_xh_t.size(0)});
-  auto input_proj_flat = at::matmul(inputs_flat, weight_xh_t);
-  auto input_proj = input_proj_flat.reshape({length, batch, hidden_size});
-  input_proj.add_(bias_contig.view({1, 1, hidden_size}));
+  auto weight_hh_t = weight_hh.contiguous().transpose(0, 1);
+  auto weight_xh_t = weight_xh.contiguous().transpose(0, 1);
+  auto bias_row = bias.contiguous().view({1, bias.size(0)});
+  auto inputs_flat = inputs.contiguous().reshape({length * batch, weight_xh_t.size(0)});
+  auto projected = at::addmm(bias_row, inputs_flat, weight_xh_t).reshape({length, batch, hidden_size});
 
-  auto state_t = initial_state.transpose(0, 1).contiguous();
-  std::vector<at::Tensor> steps;
-  steps.reserve(length);
+  auto outputs = at::empty({length, batch, hidden_size}, inputs.options());
+  auto state = initial_state.contiguous();
+  auto next = at::empty_like(state);
 
   for (int64_t t = 0; t < length; ++t) {
-    auto base_t = input_proj.select(0, t).transpose(0, 1);
-    auto next = at::matmul(weight_hh_contig, state_t);
-    next.add_(base_t);
-    state_t = next;
-    steps.push_back(state_t.transpose(0, 1));
+    auto proj_t = projected.select(0, t);
+    at::addmm_out(next, proj_t, state, weight_hh_t, /*beta=*/1.0, /*alpha=*/1.0);
+    outputs.select(0, t).copy_(next);
+    state.copy_(next);
   }
 
-  return at::stack(steps, 0);
+  return outputs;
 }
 
 }  // namespace
