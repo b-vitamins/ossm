@@ -111,12 +111,7 @@ jobs:
 
       - name: Ensure PyTorch is available
         run: |
-          python - <<'PY'
-import importlib.util, sys
-
-if importlib.util.find_spec("torch") is None:
-    raise SystemExit("PyTorch is required to build the ossm kernels extension")
-PY
+          python -c "import importlib.util; import sys; spec = importlib.util.find_spec('torch'); sys.exit('PyTorch is required to build the ossm kernels extension' if spec is None else 0)"
 
       - name: Build kernels wheel
         run: |
