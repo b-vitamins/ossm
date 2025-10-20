@@ -42,7 +42,10 @@ COLLATE_FNS = {
 
 AVAILABLE_MODELS = ("linoss_im", "s5", "lru", "ncde", "rnn")
 AVAILABLE_HEADS = ("classification", "regression")
-AVAILABLE_VIEWS = tuple(COLLATE_FNS.keys())
+# NOTE: Dataset view options are determined by the dataset implementation, not
+# the dataloader collate functions. Enumerate the supported UEA views explicitly
+# so "raw" remains selectable even though there is no matching collate fn.
+AVAILABLE_VIEWS = ("raw", "coeff", "path")
 AVAILABLE_OPTIMIZERS = ("adamw",)
 AVAILABLE_SCHEDULERS = ("none",)
 
