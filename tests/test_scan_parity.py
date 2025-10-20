@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Callable
-
 import pytest
 import torch
 from unittest import mock
@@ -46,6 +44,14 @@ def _linear_rnn_naive(
         state = state.matmul(weight_hh_t) + base
         outputs.append(state)
     return torch.stack(outputs, dim=0)
+
+
+def _sum_real_and_imag(out: torch.Tensor) -> torch.Tensor:
+    return out.real.sum() + out.imag.sum()
+
+
+def _sum_all(out: torch.Tensor) -> torch.Tensor:
+    return out.sum()
 
 
 REFERENCE_COMPLEX_LAMBDA = torch.tensor(
@@ -224,11 +230,12 @@ def test_lru_scan_matches_naive(length: int, batch: int, state: int) -> None:
 
     torch.testing.assert_close(out_ext, out_naive, atol=2e-4, rtol=1e-4)
 
-    grad_fn: Callable[[torch.Tensor], torch.Tensor] = (
-        lambda out: out.real.sum() + out.imag.sum()
+    grad_ext = torch.autograd.grad(
+        _sum_real_and_imag(out_ext), (lambda_bar, b_seq)
     )
-    grad_ext = torch.autograd.grad(grad_fn(out_ext), (lambda_bar, b_seq))
-    grad_naive = torch.autograd.grad(grad_fn(out_naive), (lambda_bar, b_seq))
+    grad_naive = torch.autograd.grad(
+        _sum_real_and_imag(out_naive), (lambda_bar, b_seq)
+    )
     for lhs, rhs in zip(grad_ext, grad_naive):
         torch.testing.assert_close(lhs, rhs, atol=5e-5, rtol=5e-5)
 
@@ -258,11 +265,12 @@ def test_s5_scan_matches_naive(length: int, batch: int, state: int) -> None:
 
     torch.testing.assert_close(out_ext, out_naive, atol=2e-4, rtol=1e-4)
 
-    grad_fn: Callable[[torch.Tensor], torch.Tensor] = (
-        lambda out: out.real.sum() + out.imag.sum()
+    grad_ext = torch.autograd.grad(
+        _sum_real_and_imag(out_ext), (lambda_bar, b_seq)
     )
-    grad_ext = torch.autograd.grad(grad_fn(out_ext), (lambda_bar, b_seq))
-    grad_naive = torch.autograd.grad(grad_fn(out_naive), (lambda_bar, b_seq))
+    grad_naive = torch.autograd.grad(
+        _sum_real_and_imag(out_naive), (lambda_bar, b_seq)
+    )
     for lhs, rhs in zip(grad_ext, grad_naive):
         torch.testing.assert_close(lhs, rhs, atol=5e-5, rtol=5e-5)
 
@@ -297,12 +305,11 @@ def test_linear_rnn_scan_matches_naive(
 
     torch.testing.assert_close(out_ext, out_naive, atol=2e-4, rtol=1e-4)
 
-    grad_fn: Callable[[torch.Tensor], torch.Tensor] = lambda out: out.sum()
     grad_ext = torch.autograd.grad(
-        grad_fn(out_ext), (weight_hh, weight_xh, bias, inputs, initial_state)
+        _sum_all(out_ext), (weight_hh, weight_xh, bias, inputs, initial_state)
     )
     grad_naive = torch.autograd.grad(
-        grad_fn(out_naive), (weight_hh, weight_xh, bias, inputs, initial_state)
+        _sum_all(out_naive), (weight_hh, weight_xh, bias, inputs, initial_state)
     )
     for lhs, rhs in zip(grad_ext, grad_naive):
         torch.testing.assert_close(lhs, rhs, atol=2e-4, rtol=1e-4)

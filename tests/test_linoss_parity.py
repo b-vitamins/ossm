@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Callable
-
 import pytest
 import torch
 from unittest import mock
@@ -46,7 +44,9 @@ def test_linoss_scan_matches_naive(length: int, batch: int, ssm: int) -> None:
     out_naive = _naive_scan(a_matrix, b_seq)
     torch.testing.assert_close(out_custom, out_naive, atol=1e-6, rtol=1e-6)
 
-    grad_fn: Callable[[torch.Tensor], torch.Tensor] = lambda out: out.real.sum() + out.imag.sum()
+    def grad_fn(out: torch.Tensor) -> torch.Tensor:
+        return out.real.sum() + out.imag.sum()
+
     grad_custom = torch.autograd.grad(grad_fn(out_custom), (a_matrix, b_seq))
     grad_naive = torch.autograd.grad(grad_fn(out_naive), (a_matrix, b_seq))
     for lhs, rhs in zip(grad_custom, grad_naive):
