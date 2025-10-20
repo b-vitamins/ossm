@@ -18,7 +18,7 @@ focus on modelling instead of bespoke preprocessing.
 
 ## Installation
 
-> **Requirements:** Python 3.9+ and a recent PyTorch CPU wheel (GPU wheels work
+> **Requirements:** Python 3.11+ and a recent PyTorch CPU wheel (GPU wheels work
 > too). The default extras install `torchsignature` from GitHub; make sure build
 > tooling such as `git` is available on the runner.
 
@@ -237,7 +237,7 @@ pytest              # run the test suite
 
 The repository ships with a GitHub Actions workflow at
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml). It runs on pushes to
-`main`, pull requests, and manual dispatches. Each job matrix covers Python 3.9
+`main`, pull requests, and manual dispatches. Each job matrix covers Python 3.11
 and 3.11 on Ubuntu and executes the following steps:
 
 1. Install the project in editable mode with the UEA and log-signature extras.

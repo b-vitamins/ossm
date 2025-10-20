@@ -4,9 +4,15 @@ import os
 import re
 from pathlib import Path
 
+import tomllib
+
 from setuptools import setup
-from torch.utils.cpp_extension import (BuildExtension, CppExtension, CUDAExtension,
-                                       CUDA_HOME)
+from torch.utils.cpp_extension import (
+    BuildExtension,
+    CppExtension,
+    CUDAExtension,
+    CUDA_HOME,
+)
 
 root = Path(__file__).resolve().parent
 src_dir = root / "src" / "ossm" / "csrc"
@@ -21,17 +27,6 @@ def _relative_posix(path: Path) -> str:
 def read_version() -> str:
     pyproject = root / "pyproject.toml"
 
-    try:  # Python ≥3.11
-        import tomllib  # type: ignore[attr-defined]
-    except ModuleNotFoundError:  # pragma: no cover - fallback for Python 3.9/3.10
-        try:
-            import tomli as tomllib  # type: ignore[assignment]
-        except ModuleNotFoundError as exc:  # pragma: no cover - final fallback
-            text = pyproject.read_text(encoding="utf-8")
-            match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE)
-            if match is None:
-                raise RuntimeError("Unable to determine version from pyproject.toml") from exc
-            return match.group(1)
     with pyproject.open("rb") as handle:
         data = tomllib.load(handle)
     return data["project"]["version"]

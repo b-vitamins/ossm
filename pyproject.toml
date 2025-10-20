@@ -7,7 +7,7 @@ name = "ossm"
 version = "0.1.1"
 description = "OSS time-series datasets and transforms for RNN/SSM/NCDE/NRDE with torchsignature integration."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "OSS Maintainers" }]
 

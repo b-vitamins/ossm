@@ -50,7 +50,7 @@ ruff format .
 
 ## Coding Style & Naming Conventions
 
-* Python ≥ 3.9 with explicit type hints; use `torch.Tensor` in signatures.
+* Python ≥ 3.11 with explicit type hints; use `torch.Tensor` in signatures.
 * Files: `snake_case.py`; Classes: `PascalCase`; functions/vars: `snake_case`.
 * Torch-first: preserve `device`/`dtype`, avoid NumPy in hot paths.
 * Transforms should be stateless and composable; no hidden globals.
