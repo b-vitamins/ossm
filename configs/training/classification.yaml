@@ -1,8 +1,12 @@
 device: cpu
 max_steps: 100000
+epochs: null
 log_interval: 1000
 eval_interval: 5000
 grad_clip: null
 classification: true
 metric: accuracy
 checkpoint_dir: ${paths.work_dir}
+prefetch_gpu: false
+prefetch_depth: 2
+cudnn_benchmark: false
