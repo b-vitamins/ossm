@@ -12,6 +12,12 @@ root = Path(__file__).resolve().parent
 src_dir = root / "src" / "ossm" / "csrc"
 
 
+def _relative_posix(path: Path) -> str:
+    """Return a path relative to the project root using POSIX separators."""
+
+    return path.relative_to(root).as_posix()
+
+
 def read_version() -> str:
     pyproject = root / "pyproject.toml"
 
@@ -37,8 +43,8 @@ if suffix:
     normalized_suffix = re.sub(r"[^0-9A-Za-z.-]", "-", suffix)
     version = f"{version}+{normalized_suffix}"
 
-cpp_sources = sorted(str(path) for path in src_dir.glob("*.cpp"))
-cuda_sources = sorted(str(path) for path in src_dir.glob("*.cu"))
+cpp_sources = sorted(_relative_posix(path) for path in src_dir.glob("*.cpp"))
+cuda_sources = sorted(_relative_posix(path) for path in src_dir.glob("*.cu"))
 
 use_cuda = bool(cuda_sources) and CUDA_HOME is not None
 sources = cpp_sources + (cuda_sources if use_cuda else [])
@@ -71,7 +77,7 @@ if use_cuda:
 extension_kwargs = dict(
     name="ossm._kernels",
     sources=sources,
-    include_dirs=[str(src_dir)],
+    include_dirs=[_relative_posix(src_dir)],
     extra_compile_args=extra_compile_args,
 )
 
