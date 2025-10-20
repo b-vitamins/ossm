@@ -75,15 +75,15 @@ jobs:
       matrix:
         include:
           - flavor: cpu
-            container: pytorch/pytorch:2.8.0-cpu-py3.11
+            container: mcr.microsoft.com/devcontainers/python:3.11
             torch_index_url: https://download.pytorch.org/whl/cpu
             build_suffix: cpu
             cuda_home: ""
             arch_list: ""
-          - flavor: cu121
-            container: pytorch/pytorch:2.8.0-cuda12.1-cudnn9-devel
-            torch_index_url: https://download.pytorch.org/whl/cu121
-            build_suffix: cu121
+          - flavor: cu126
+            container: pytorch/pytorch:2.8.0-cuda12.6-cudnn9-devel
+            torch_index_url: https://download.pytorch.org/whl/cu126
+            build_suffix: cu126
             cuda_home: /usr/local/cuda
             arch_list: "80;86;89;90"
     container:
