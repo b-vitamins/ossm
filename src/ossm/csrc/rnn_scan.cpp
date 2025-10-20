@@ -1,5 +1,4 @@
 #include <ATen/TensorUtils.h>
-#include <vector>
 #include <torch/extension.h>
 
 namespace ossm {
@@ -43,7 +42,6 @@ at::Tensor linear_rnn_scan_cpu(const at::Tensor& weight_hh,
 
   auto weight_hh_contig = weight_hh.contiguous();
   auto weight_hh_t = weight_hh_contig.transpose(0, 1).contiguous();
-  (void)weight_hh_t;  // avoid unused warning in CPU path
   auto weight_xh_t = weight_xh.contiguous().transpose(0, 1).contiguous();
   auto bias_contig = bias.contiguous();
   auto inputs_contig = inputs.contiguous();
@@ -52,19 +50,17 @@ at::Tensor linear_rnn_scan_cpu(const at::Tensor& weight_hh,
   auto input_proj = input_proj_flat.reshape({length, batch, hidden_size});
   input_proj.add_(bias_contig.view({1, 1, hidden_size}));
 
-  auto state_t = initial_state.transpose(0, 1).contiguous();
-  std::vector<at::Tensor> steps;
-  steps.reserve(length);
+  auto state = initial_state.contiguous();
+  auto result = at::empty({length, batch, hidden_size}, inputs.options());
 
   for (int64_t t = 0; t < length; ++t) {
-    auto base_t = input_proj.select(0, t).transpose(0, 1);
-    auto next = at::matmul(weight_hh_contig, state_t);
-    next.add_(base_t);
-    state_t = next;
-    steps.push_back(state_t.transpose(0, 1));
+    auto current = input_proj.select(0, t);
+    current.addmm_(state, weight_hh_t);
+    result.select(0, t).copy_(current);
+    state = current;
   }
 
-  return at::stack(steps, 0);
+  return result;
 }
 
 #ifdef WITH_CUDA

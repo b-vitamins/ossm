@@ -2,6 +2,7 @@
 #include <ATen/TensorUtils.h>
 #include <c10/util/complex.h>
 #include <torch/extension.h>
+#include <vector>
 
 namespace ossm {
 namespace {
@@ -23,23 +24,42 @@ void lru_scan_cpu_kernel(const scalar_t* lambda_real,
                 "Complex representation must occupy two scalars");
 
   const auto total_series = batch * state_size;
+  const auto time_stride = total_series;
+  const auto batch_stride = state_size;
+
+  std::vector<complex_t> lambda_values(state_size);
+  for (int64_t s = 0; s < state_size; ++s) {
+    lambda_values[s] = complex_t(lambda_real[s], lambda_imag[s]);
+  }
+
   const auto* b_complex = reinterpret_cast<const complex_t*>(b_seq);
   auto* out_complex = reinterpret_cast<complex_t*>(out);
 
-  at::parallel_for(0, total_series, 0, [&](int64_t start, int64_t end) {
-    for (int64_t index = start; index < end; ++index) {
-      const int64_t state_index = index % state_size;
-      const complex_t lambda(lambda_real[state_index], lambda_imag[state_index]);
+  at::parallel_for(0, batch, 0, [&](int64_t batch_start, int64_t batch_end) {
+    const int64_t local_batch = batch_end - batch_start;
+    if (local_batch == 0) {
+      return;
+    }
 
-      complex_t state = complex_t(0, 0);
-      const complex_t* b_step = b_complex + index;
-      complex_t* out_step = out_complex + index;
+    std::vector<complex_t> state(local_batch * state_size, complex_t(0, 0));
+    const complex_t* lambda_ptr = lambda_values.data();
 
-      for (int64_t t = 0; t < length; ++t) {
-        state = lambda * state + *b_step;
-        *out_step = state;
-        b_step += total_series;
-        out_step += total_series;
+    for (int64_t t = 0; t < length; ++t) {
+      const int64_t base_offset = t * time_stride + batch_start * batch_stride;
+      const complex_t* b_step = b_complex + base_offset;
+      complex_t* out_step = out_complex + base_offset;
+      complex_t* state_ptr = state.data();
+
+      for (int64_t b = 0; b < local_batch; ++b) {
+        const complex_t* b_row = b_step + b * batch_stride;
+        complex_t* out_row = out_step + b * batch_stride;
+        complex_t* state_row = state_ptr + b * batch_stride;
+
+        for (int64_t s = 0; s < state_size; ++s) {
+          const complex_t updated = lambda_ptr[s] * state_row[s] + b_row[s];
+          state_row[s] = updated;
+          out_row[s] = updated;
+        }
       }
     }
   });
