@@ -127,7 +127,10 @@ class UEA(Dataset):
 
         self._resampled_indices = None
         if resample is not None and self.values.numel():
-            self._resampled_indices = self._build_resample_indices(resample, resample_seed)
+            resample_dict = resample
+            if not isinstance(resample_dict, dict):
+                resample_dict = dict(resample_dict)
+            self._resampled_indices = self._build_resample_indices(resample_dict, resample_seed)
 
         selection = self._select_indices(self._target_split)
         if selection is not None:

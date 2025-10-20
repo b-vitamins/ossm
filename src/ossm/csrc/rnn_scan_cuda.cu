@@ -1,9 +1,9 @@
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
-#include <utility>
 #include <vector>
 
+namespace ossm {
 namespace {
 
 at::Tensor linear_rnn_scan_cuda_impl(const at::Tensor& weight_hh,
@@ -34,7 +34,6 @@ at::Tensor linear_rnn_scan_cuda_impl(const at::Tensor& weight_hh,
   auto input_proj = input_proj_flat.reshape({length, batch, hidden_size});
   input_proj.add_(bias_contig.view({1, 1, hidden_size}));
 
-  auto weight_hh_t = weight_hh_contig.transpose(0, 1).contiguous();
   auto state_t = initial_state.transpose(0, 1).contiguous();
   std::vector<at::Tensor> steps;
   steps.reserve(length);
@@ -61,3 +60,4 @@ at::Tensor linear_rnn_scan_cuda(const at::Tensor& weight_hh,
   return linear_rnn_scan_cuda_impl(weight_hh, weight_xh, bias, inputs, initial_state);
 }
 
+}  // namespace ossm

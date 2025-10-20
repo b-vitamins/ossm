@@ -150,12 +150,6 @@ def _run_associative_scan(a_matrix: Tensor, b_seq: Tensor) -> Tensor:
     return cast(Tensor, _LinossScanFn.apply(a_matrix, b_seq))
 
 
-def _complex_from_pair(param: Tensor) -> Tensor:
-    """View a real tensor with a trailing size-2 dimension as complex."""
-
-    return torch.view_as_complex(param.contiguous())
-
-
 class GatedLinearUnit(nn.Module):
     """Feature-wise gated linear unit."""
 
@@ -187,11 +181,12 @@ class LinOSSLayer(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        std = 1.0 / math.sqrt(self.hidden_dim)
+        b_std = 1.0 / math.sqrt(self.hidden_dim)
+        c_std = 1.0 / math.sqrt(self.ssm_size)
         nn.init.uniform_(self.A_diag, 0.0, 1.0)
         nn.init.uniform_(self.steps, 0.0, 1.0)
-        nn.init.uniform_(self.B, -std, std)
-        nn.init.uniform_(self.C, -std, std)
+        nn.init.uniform_(self.B, -b_std, b_std)
+        nn.init.uniform_(self.C, -c_std, c_std)
         nn.init.normal_(self.D, mean=0.0, std=1.0)
 
     def forward(self, inputs: Tensor) -> Tensor:
@@ -207,29 +202,35 @@ class LinOSSLayer(nn.Module):
 
         device = inputs.device
         dtype = inputs.dtype
-        complex_dtype = (
-            torch.complex64 if dtype in {torch.float32, torch.bfloat16} else torch.complex128
-        )
 
         a_diag = torch.relu(self.A_diag).to(device=device, dtype=dtype)
         step = torch.sigmoid(self.steps).to(device=device, dtype=dtype)
-        b_complex = _complex_from_pair(self.B).to(device=device, dtype=complex_dtype)
-        c_complex = _complex_from_pair(self.C).to(device=device, dtype=complex_dtype)
+
+        b_real = self.B[..., 0].to(device=device, dtype=dtype)
+        b_imag = self.B[..., 1].to(device=device, dtype=dtype)
+        c_real = self.C[..., 0].to(device=device, dtype=dtype)
+        c_imag = self.C[..., 1].to(device=device, dtype=dtype)
         d_vec = self.D.to(device=device, dtype=dtype)
 
-        inputs_complex = inputs.to(dtype=dtype).to(dtype=complex_dtype)
-        bu = inputs_complex.reshape(batch * length, hidden_dim)
-        bu = bu @ b_complex.transpose(1, 0)
-        bu = bu.reshape(batch, length, self.ssm_size)
+        flat_inputs = inputs.to(dtype=dtype).reshape(batch * length, hidden_dim)
+        b_real_t = b_real.transpose(0, 1)
+        b_imag_t = b_imag.transpose(0, 1)
+        bu_real = flat_inputs @ b_real_t
+        bu_imag = flat_inputs @ b_imag_t
+        bu = torch.complex(bu_real, bu_imag).reshape(batch, length, self.ssm_size)
 
         if self.discretization == "IM":
             outputs_complex = self._apply_im(a_diag, step, bu)
         else:
             outputs_complex = self._apply_imex(a_diag, step, bu)
 
-        projected = outputs_complex.reshape(batch * length, self.ssm_size)
-        projected = projected @ c_complex.transpose(1, 0)
-        projected = projected.reshape(batch, length, self.hidden_dim).real
+        states = outputs_complex.reshape(batch * length, self.ssm_size)
+        states_real = states.real
+        states_imag = states.imag
+        c_real_t = c_real.transpose(0, 1)
+        c_imag_t = c_imag.transpose(0, 1)
+        projected_real = states_real @ c_real_t - states_imag @ c_imag_t
+        projected = projected_real.reshape(batch, length, self.hidden_dim)
         du = inputs * d_vec
         return projected + du
 
@@ -282,14 +283,25 @@ class LinOSSLayer(nn.Module):
             dim=-2,
         ).to(device=device, dtype=matrix_dtype)
 
+        bu_seq = bu.permute(1, 0, 2).contiguous()
+        step_broadcast = step.view(1, 1, -1)
         if imex:
-            f1 = bu * step
-            f2 = bu * (step**2)
+            f1 = bu_seq * step_broadcast
+            f2 = bu_seq * (step_broadcast * step_broadcast)
         else:
-            f1 = (m11 * step) * bu
-            f2 = (m21 * step) * bu
+            f1 = bu_seq * (m11 * step).view(1, 1, -1)
+            f2 = bu_seq * (m21 * step).view(1, 1, -1)
 
-        b_elems = torch.stack((f1, f2), dim=-1).permute(1, 0, 2, 3).contiguous()
+        b_elems = torch.empty(
+            bu_seq.size(0),
+            bu_seq.size(1),
+            bu_seq.size(2),
+            2,
+            dtype=bu_seq.dtype,
+            device=bu_seq.device,
+        )
+        b_elems[..., 0] = f1
+        b_elems[..., 1] = f2
 
         states = _run_associative_scan(a_matrix, b_elems)
         states = states.permute(1, 0, 2, 3).contiguous()

@@ -2,6 +2,7 @@ defaults:
   - paths: default
   - dataset: uea_coeff_train
   - validation_dataset: uea_coeff_val
+  - test_dataset: uea_coeff_test
   - model: linoss_im
   - head: classification
   - optimizer: adamw

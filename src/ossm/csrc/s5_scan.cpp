@@ -3,25 +3,24 @@
 #include <c10/util/complex.h>
 #include <torch/extension.h>
 
+namespace ossm {
 namespace {
 
 template <typename scalar_t>
-void s5_scan_cpu_kernel(
-    const scalar_t* lambda_real,
-    const scalar_t* lambda_imag,
-    const scalar_t* b_seq,
-    scalar_t* out,
-    int64_t length,
-    int64_t batch,
-    int64_t state_size) {
+void s5_scan_cpu_kernel(const scalar_t* lambda_real,
+                        const scalar_t* lambda_imag,
+                        const scalar_t* b_seq,
+                        scalar_t* out,
+                        int64_t length,
+                        int64_t batch,
+                        int64_t state_size) {
   if (length == 0 || batch == 0 || state_size == 0) {
     return;
   }
 
   using complex_t = c10::complex<scalar_t>;
-  static_assert(
-      sizeof(complex_t) == sizeof(scalar_t) * 2,
-      "Complex representation must occupy two scalars");
+  static_assert(sizeof(complex_t) == sizeof(scalar_t) * 2,
+                "Complex representation must occupy two scalars");
   const auto total_series = batch * state_size;
   const auto* b_complex = reinterpret_cast<const complex_t*>(b_seq);
   auto* out_complex = reinterpret_cast<complex_t*>(out);
@@ -77,26 +76,25 @@ at::Tensor s5_scan_cpu(const at::Tensor& lambda_real,
   }
 
   AT_DISPATCH_FLOATING_TYPES(lambda_real_contig.scalar_type(), "s5_scan_cpu", [&] {
-    s5_scan_cpu_kernel<scalar_t>(
-        lambda_real_contig.data_ptr<scalar_t>(),
-        lambda_imag_contig.data_ptr<scalar_t>(),
-        b_seq_contig.data_ptr<scalar_t>(),
-        result.data_ptr<scalar_t>(),
-        length,
-        batch,
-        state_size);
+    s5_scan_cpu_kernel<scalar_t>(lambda_real_contig.data_ptr<scalar_t>(),
+                                 lambda_imag_contig.data_ptr<scalar_t>(),
+                                 b_seq_contig.data_ptr<scalar_t>(),
+                                 result.data_ptr<scalar_t>(),
+                                 length,
+                                 batch,
+                                 state_size);
   });
 
   return result;
 }
-
-}  // namespace
 
 #ifdef WITH_CUDA
 at::Tensor s5_scan_cuda(const at::Tensor& lambda_real,
                         const at::Tensor& lambda_imag,
                         const at::Tensor& b_seq);
 #endif
+
+}  // namespace
 
 at::Tensor s5_scan(const at::Tensor& lambda_real,
                    const at::Tensor& lambda_imag,
@@ -105,10 +103,9 @@ at::Tensor s5_scan(const at::Tensor& lambda_real,
     return at::empty_like(b_seq);
   }
 
-  TORCH_CHECK(
-      b_seq.dim() == 4,
-      "b_seq must have shape (length, batch, state, 2), got ",
-      b_seq.sizes());
+  TORCH_CHECK(b_seq.dim() == 4,
+              "b_seq must have shape (length, batch, state, 2), got ",
+              b_seq.sizes());
 
   if (b_seq.is_cuda()) {
 #ifdef WITH_CUDA
@@ -121,6 +118,4 @@ at::Tensor s5_scan(const at::Tensor& lambda_real,
   return s5_scan_cpu(lambda_real, lambda_imag, b_seq);
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("s5_scan", &s5_scan, "S5 associative scan kernel");
-}
+}  // namespace ossm

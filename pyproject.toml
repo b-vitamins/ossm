@@ -8,7 +8,7 @@ version = "0.1.1"
 description = "OSS time-series datasets and transforms for RNN/SSM/NCDE/NRDE with torchsignature integration."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "OSS Maintainers" }]
 
 dependencies = [
@@ -24,6 +24,11 @@ dependencies = [
 [project.optional-dependencies]
 uea = ["sktime>=0.21.0"]
 signature = ["torchsignature @ git+https://github.com/b-vitamins/torchsignature"]
+linoss = [
+  "jax>=0.4.30",
+  "jaxlib>=0.4.30",
+  "equinox>=0.11.0",
+]
 
 [tool.pytest.ini_options]
 addopts = "-q"
