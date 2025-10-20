@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-import torch
 from torch import Tensor
 
 __all__ = ["try_run_linear_rnn_scan"]
