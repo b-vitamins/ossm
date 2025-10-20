@@ -26,7 +26,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install poetry-core
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
           python -m pip install --no-build-isolation -e .[uea,signature]
           python -m pip install ruff pyright pytest
 
@@ -75,13 +75,13 @@ jobs:
       matrix:
         include:
           - flavor: cpu
-            container: pytorch/pytorch:2.2.2-cpu-py3.11
+            container: pytorch/pytorch:2.8.0-cpu-py3.11
             torch-index-url: https://download.pytorch.org/whl/cpu
             build-suffix: cpu
             cuda-home: ""
             arch-list: ""
           - flavor: cu121
-            container: pytorch/pytorch:2.2.2-cuda12.1-cudnn8-devel
+            container: pytorch/pytorch:2.8.0-cuda12.1-cudnn9-devel
             torch-index-url: https://download.pytorch.org/whl/cu121
             build-suffix: cu121
             cuda-home: /usr/local/cuda
@@ -107,7 +107,7 @@ jobs:
           python -m pip install --upgrade build wheel ninja
 
       - name: Install PyTorch wheel
-        run: python -m pip install --upgrade torch --index-url ${{ matrix.torch-index-url }}
+        run: python -m pip install --upgrade torch==2.8.0 --index-url ${{ matrix.torch-index-url }}
 
       - name: Ensure PyTorch is available
         run: |
