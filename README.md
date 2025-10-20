@@ -16,6 +16,42 @@ focus on modelling instead of bespoke preprocessing.
 - **Tested and type-checked** via the accompanying GitHub Actions workflow that
   enforces `ruff`, `pyright`, and `pytest` on every push and pull request.
 
+## Quick start
+
+1. **Create an environment** with Python 3.11+ and install PyTorch 2.8.0 that
+   matches your hardware. For example:
+
+   ```bash
+   # CPU-only
+   pip install --extra-index-url https://download.pytorch.org/whl/cpu torch==2.8.0
+
+   # CUDA 12.6 (requires a compatible NVIDIA driver)
+   pip install --extra-index-url https://download.pytorch.org/whl/cu126 torch==2.8.0
+   ```
+
+2. **Install OSSM and the common extras**. Editable installs are convenient
+   during development while wheel installs suit production use:
+
+   ```bash
+   # Development (builds the optimized kernels locally)
+   pip install -e .[uea,signature]
+
+   # From a prebuilt wheel pair downloaded from CI artifacts (see below)
+   pip install path/to/ossm-*.whl
+   pip install path/to/ossm_kernels-*.whl
+   ```
+
+3. **Verify the extension** by running the parity tests. They compile on the
+   fly and confirm that the CUDA/CPU kernels are importable:
+
+   ```bash
+   pytest tests/test_scan_parity.py -q
+   ```
+
+   On GPU runners ensure the `CUDA_VISIBLE_DEVICES` environment variable exposes
+   a device that supports the architectures listed in the CI matrix
+   (`sm_80`, `sm_86`, `sm_89`, `sm_90`).
+
 ## Installation
 
 > **Requirements:** Python 3.11+ and a recent PyTorch CPU wheel (GPU wheels work
@@ -52,7 +88,7 @@ Additional extras are defined in `pyproject.toml`:
 - `signature` — installs the log-signature backend (`torchsignature`).
 - `linoss` — optional JAX stack used by the LinOSS parity checks.
 
-## Quickstart
+## Dataset quickstart
 
 ```python
 from torch.utils.data import DataLoader
