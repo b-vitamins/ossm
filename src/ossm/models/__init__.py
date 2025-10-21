@@ -2,6 +2,7 @@
 
 from .base import Backbone, Head, SequenceBackboneOutput
 from .heads import ClassificationHead, RegressionHead
+from .dlinoss import DampedLinOSSBackbone, DampedLinOSSBlock, DampedLinOSSLayer
 from .linoss import LinOSSBackbone, LinOSSBlock, LinOSSLayer
 from .lru import LRUBackbone, LRUBlock, LRULayer
 from .ncde import NCDEBackbone, NCDELayer, NCDEVectorField, NRDELayer
@@ -22,6 +23,9 @@ __all__ = [
     "SequenceBackboneOutput",
     "ClassificationHead",
     "RegressionHead",
+    "DampedLinOSSBackbone",
+    "DampedLinOSSBlock",
+    "DampedLinOSSLayer",
     "LinOSSBackbone",
     "LinOSSBlock",
     "LinOSSLayer",

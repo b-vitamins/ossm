@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import math
+import logging
 import logging
 import sys
 import time
@@ -24,6 +26,7 @@ from ossm.data.datasets.collate import coeff_collate, pad_collate, path_collate
 from ossm.models import (
     Backbone,
     ClassificationHead,
+    DampedLinOSSBackbone,
     Head,
     LRUBackbone,
     LinOSSBackbone,
@@ -40,7 +43,7 @@ COLLATE_FNS = {
     "path": path_collate,
 }
 
-AVAILABLE_MODELS = ("linoss_im", "s5", "lru", "ncde", "rnn")
+AVAILABLE_MODELS = ("linoss_im", "dlinoss_imex1", "s5", "lru", "ncde", "rnn")
 AVAILABLE_HEADS = ("classification", "regression")
 # NOTE: Dataset view options are determined by the dataset implementation, not
 # the dataloader collate functions. Enumerate the supported UEA views explicitly
@@ -233,6 +236,25 @@ def _build_backbone(
             ssm_size=int(params.get("ssm_size", 64)),
             hidden_dim=int(params.get("hidden_dim", 128)),
             discretization=str(params.get("discretization", "IM")),
+        )
+    elif name == "dlinoss":
+        backbone = DampedLinOSSBackbone(
+            num_blocks=int(params.get("num_blocks", 4)),
+            input_dim=input_dim,
+            ssm_size=int(params.get("ssm_size", 64)),
+            hidden_dim=int(params.get("hidden_dim", 128)),
+            variant=str(params.get("variant", "imex1")),
+            initialization=str(params.get("initialization", "ring")),
+            r_min=float(params.get("r_min", 0.9)),
+            r_max=float(params.get("r_max", 1.0)),
+            theta_min=float(params.get("theta_min", 0.0)),
+            theta_max=float(params.get("theta_max", math.pi)),
+            A_min=float(params.get("A_min", 0.0)),
+            A_max=float(params.get("A_max", 1.0)),
+            G_min=float(params.get("G_min", 0.0)),
+            G_max=float(params.get("G_max", 1.0)),
+            dt_std=float(params.get("dt_std", 0.5)),
+            dropout=float(params.get("dropout", 0.1)),
         )
     elif name == "s5":
         backbone = S5Backbone(
