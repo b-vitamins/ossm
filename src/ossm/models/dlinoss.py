@@ -9,8 +9,9 @@ from typing import Tuple
 import torch
 from torch import Tensor, nn
 
+from ._dlinoss_scan import run_dlinoss_imex1
 from .base import Backbone, SequenceBackboneOutput
-from .linoss import GatedLinearUnit, _run_associative_scan
+from .linoss import GatedLinearUnit
 
 __all__ = [
     "DampedLinOSSLayer",
@@ -234,45 +235,9 @@ class DampedLinOSSLayer(nn.Module):
         if length == 0:
             return bu.new_zeros(batch, 0, self.ssm_size)
 
-        device = bu.device
-        dtype = bu.dtype
-
-        denom = 1.0 + step * g_diag
-        denom = denom.to(device=device, dtype=dtype)
-
-        m11 = 1.0 / denom
-        m12 = -(step * a_diag) / denom
-        m21 = step / denom
-        m22 = 1.0 - (step * step * a_diag) / denom
-
         bu_seq = bu.permute(1, 0, 2).contiguous()
-        step_broadcast = step.view(1, 1, -1)
-        denom_broadcast = denom.view(1, 1, -1)
-        f1 = bu_seq * (step_broadcast / denom_broadcast)
-        f2 = bu_seq * (step_broadcast * step_broadcast / denom_broadcast)
-
-        a_matrix = torch.stack(
-            (
-                torch.stack((m11, m12), dim=-1),
-                torch.stack((m21, m22), dim=-1),
-            ),
-            dim=-2,
-        ).to(device=device, dtype=dtype)
-
-        b_elems = torch.empty(
-            bu_seq.size(0),
-            bu_seq.size(1),
-            bu_seq.size(2),
-            2,
-            dtype=bu_seq.dtype,
-            device=bu_seq.device,
-        )
-        b_elems[..., 0] = f1
-        b_elems[..., 1] = f2
-
-        states = _run_associative_scan(a_matrix, b_elems)
-        states = states.permute(1, 0, 2, 3).contiguous()
-        return states[..., 1]
+        states = run_dlinoss_imex1(a_diag, g_diag, step, bu_seq)
+        return states.permute(1, 0, 2).contiguous()
 
 
 class DampedLinOSSBlock(nn.Module):
