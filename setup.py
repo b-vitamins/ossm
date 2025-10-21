@@ -94,6 +94,5 @@ setup(
     package_dir={'': 'src'},
     ext_modules=[extension_cls(**extension_kwargs)],
     cmdclass={"build_ext": BuildExtension},
-    setup_requires=["wheel"],
 )
 
