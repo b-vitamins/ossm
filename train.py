@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import math
 import logging
-import logging
 import sys
 import time
 from collections import deque
