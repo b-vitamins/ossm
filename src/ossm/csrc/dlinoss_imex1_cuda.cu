@@ -3,15 +3,8 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 
-#include <algorithm>
-
 namespace ossm {
 namespace {
-
-template <typename scalar_t>
-__device__ inline scalar_t complex_conj(const scalar_t& value) {
-  return scalar_t(value.real(), -value.imag());
-}
 
 template <typename scalar_t>
 __global__ void dlinoss_imex1_forward_kernel(const typename scalar_t::value_type* __restrict__ a_diag,
@@ -41,23 +34,31 @@ __global__ void dlinoss_imex1_forward_kernel(const typename scalar_t::value_type
     const value_t coeff12 = -alpha * sigma_inv;
     const value_t coeff22 = value_t(1) - alpha * sigma2_inv;
 
-    scalar_t state0 = scalar_t(0, 0);
-    scalar_t state1 = scalar_t(0, 0);
+    value_t state0_real = value_t(0);
+    value_t state0_imag = value_t(0);
+    value_t state1_real = value_t(0);
+    value_t state1_imag = value_t(0);
 
     for (int64_t t = 0; t < length; ++t) {
       const int64_t bu_offset = t * series + idx;
       const int64_t out_offset = t * step_stride + idx * 2;
 
       const scalar_t bu_val = bu_ptr[bu_offset];
+      const value_t bu_real = bu_val.real();
+      const value_t bu_imag = bu_val.imag();
 
-      const scalar_t new0 = state0 * inv + state1 * coeff12 + bu_val * sigma_inv;
-      const scalar_t new1 = state0 * sigma_inv + state1 * coeff22 + bu_val * sigma2_inv;
+      const value_t new0_real = state0_real * inv + state1_real * coeff12 + bu_real * sigma_inv;
+      const value_t new0_imag = state0_imag * inv + state1_imag * coeff12 + bu_imag * sigma_inv;
+      const value_t new1_real = state0_real * sigma_inv + state1_real * coeff22 + bu_real * sigma2_inv;
+      const value_t new1_imag = state0_imag * sigma_inv + state1_imag * coeff22 + bu_imag * sigma2_inv;
 
-      out_ptr[out_offset] = new0;
-      out_ptr[out_offset + 1] = new1;
+      out_ptr[out_offset] = scalar_t(new0_real, new0_imag);
+      out_ptr[out_offset + 1] = scalar_t(new1_real, new1_imag);
 
-      state0 = new0;
-      state1 = new1;
+      state0_real = new0_real;
+      state0_imag = new0_imag;
+      state1_real = new1_real;
+      state1_imag = new1_imag;
     }
   }
 }
@@ -95,8 +96,10 @@ __global__ void dlinoss_imex1_backward_kernel(const typename scalar_t::value_typ
     const value_t coeff12 = -alpha * sigma_inv;
     const value_t coeff22 = value_t(1) - alpha * sigma2_inv;
 
-    scalar_t grad_state0 = scalar_t(0, 0);
-    scalar_t grad_state1 = scalar_t(0, 0);
+    value_t grad_state0_real = value_t(0);
+    value_t grad_state0_imag = value_t(0);
+    value_t grad_state1_real = value_t(0);
+    value_t grad_state1_imag = value_t(0);
 
     value_t grad_alpha_local = value_t(0);
     value_t grad_sigma_inv_local = value_t(0);
@@ -107,32 +110,52 @@ __global__ void dlinoss_imex1_backward_kernel(const typename scalar_t::value_typ
       const int64_t base_offset = t * step_stride + idx * 2;
       const int64_t bu_offset = t * series + idx;
 
-      const scalar_t prev0 = t > 0 ? states_ptr[base_offset - step_stride] : scalar_t(0, 0);
-      const scalar_t prev1 = t > 0 ? states_ptr[base_offset - step_stride + 1] : scalar_t(0, 0);
+      const scalar_t prev0_val = t > 0 ? states_ptr[base_offset - step_stride] : scalar_t(0, 0);
+      const scalar_t prev1_val = t > 0 ? states_ptr[base_offset - step_stride + 1] : scalar_t(0, 0);
       const scalar_t bu_val = bu_ptr[bu_offset];
+      const scalar_t grad_out_val = grad_out_ptr[bu_offset];
 
-      const scalar_t grad_new1 = grad_state1 + grad_out_ptr[bu_offset];
-      const scalar_t grad_new0 = grad_state0;
+      const value_t prev0_real = prev0_val.real();
+      const value_t prev0_imag = prev0_val.imag();
+      const value_t prev1_real = prev1_val.real();
+      const value_t prev1_imag = prev1_val.imag();
+      const value_t bu_real = bu_val.real();
+      const value_t bu_imag = bu_val.imag();
+      const value_t grad_out_real = grad_out_val.real();
+      const value_t grad_out_imag = grad_out_val.imag();
 
-      const scalar_t conj_grad0 = complex_conj(grad_new0);
-      const scalar_t conj_grad1 = complex_conj(grad_new1);
+      const value_t grad_new1_real = grad_state1_real + grad_out_real;
+      const value_t grad_new1_imag = grad_state1_imag + grad_out_imag;
+      const value_t grad_new0_real = grad_state0_real;
+      const value_t grad_new0_imag = grad_state0_imag;
 
-      const scalar_t neg_alpha_prev1 = prev1 * (-alpha);
-      const scalar_t bu_combined = neg_alpha_prev1 + bu_val;
+      const value_t neg_alpha_prev1_real = -alpha * prev1_real;
+      const value_t neg_alpha_prev1_imag = -alpha * prev1_imag;
+      const value_t bu_combined_real = neg_alpha_prev1_real + bu_real;
+      const value_t bu_combined_imag = neg_alpha_prev1_imag + bu_imag;
 
-      grad_sigma_inv_local += (conj_grad0 * bu_combined).real() + (conj_grad1 * prev0).real();
-      grad_sigma2_inv_local += (conj_grad1 * bu_combined).real();
-      grad_alpha_local += (conj_grad0 * (prev1 * (-sigma_inv))).real() +
-                          (conj_grad1 * (prev1 * (-sigma2_inv))).real();
-      grad_inv_local += (conj_grad0 * prev0).real();
+      grad_sigma_inv_local += grad_new0_real * bu_combined_real + grad_new0_imag * bu_combined_imag;
+      grad_sigma_inv_local += grad_new1_real * prev0_real + grad_new1_imag * prev0_imag;
+      grad_sigma2_inv_local += grad_new1_real * bu_combined_real + grad_new1_imag * bu_combined_imag;
+      grad_alpha_local += grad_new0_real * (-sigma_inv * prev1_real) +
+                          grad_new0_imag * (-sigma_inv * prev1_imag);
+      grad_alpha_local += grad_new1_real * (-sigma2_inv * prev1_real) +
+                          grad_new1_imag * (-sigma2_inv * prev1_imag);
+      grad_inv_local += grad_new0_real * prev0_real + grad_new0_imag * prev0_imag;
 
-      grad_bu_ptr[bu_offset] = grad_new0 * sigma_inv + grad_new1 * sigma2_inv;
+      const value_t grad_bu_real = grad_new0_real * sigma_inv + grad_new1_real * sigma2_inv;
+      const value_t grad_bu_imag = grad_new0_imag * sigma_inv + grad_new1_imag * sigma2_inv;
+      grad_bu_ptr[bu_offset] = scalar_t(grad_bu_real, grad_bu_imag);
 
-      const scalar_t grad_prev0 = grad_new0 * inv + grad_new1 * sigma_inv;
-      const scalar_t grad_prev1 = grad_new0 * coeff12 + grad_new1 * coeff22;
+      const value_t grad_prev0_real = grad_new0_real * inv + grad_new1_real * sigma_inv;
+      const value_t grad_prev0_imag = grad_new0_imag * inv + grad_new1_imag * sigma_inv;
+      const value_t grad_prev1_real = grad_new0_real * coeff12 + grad_new1_real * coeff22;
+      const value_t grad_prev1_imag = grad_new0_imag * coeff12 + grad_new1_imag * coeff22;
 
-      grad_state0 = grad_prev0;
-      grad_state1 = grad_prev1;
+      grad_state0_real = grad_prev0_real;
+      grad_state0_imag = grad_prev0_imag;
+      grad_state1_real = grad_prev1_real;
+      grad_state1_imag = grad_prev1_imag;
     }
 
     value_t grad_sigma_local = grad_sigma_inv_local * inv;

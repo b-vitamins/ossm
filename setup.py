@@ -45,7 +45,7 @@ use_cuda = bool(cuda_sources) and CUDA_HOME is not None
 sources = cpp_sources + (cuda_sources if use_cuda else [])
 extension_cls = CUDAExtension if use_cuda else CppExtension
 
-extra_compile_args = {"cxx": ["-O3", "-std=c++17"]}
+extra_compile_args = {"cxx": ["-O3", "-std=c++17", "-march=native"]}
 
 if use_cuda:
     nvcc_flags = [
