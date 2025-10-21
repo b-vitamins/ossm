@@ -4,6 +4,9 @@ import os
 import re
 from pathlib import Path
 
+import subprocess
+import sys
+
 import tomllib
 
 from setuptools import setup
@@ -16,6 +19,18 @@ from torch.utils.cpp_extension import (
 
 root = Path(__file__).resolve().parent
 src_dir = root / "src" / "ossm" / "csrc"
+
+
+def _ensure_wheel() -> None:
+    """Ensure the wheel package is available when setuptools needs it."""
+
+    try:
+        import wheel  # noqa: F401  # pragma: no cover
+    except ModuleNotFoundError:  # pragma: no cover - best-effort safeguard
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "wheel"])
+
+
+_ensure_wheel()
 
 
 def _relative_posix(path: Path) -> str:
@@ -87,3 +102,4 @@ setup(
     cmdclass={"build_ext": BuildExtension},
     setup_requires=["wheel"],
 )
+
