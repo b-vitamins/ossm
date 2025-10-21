@@ -4,7 +4,6 @@ import os
 import re
 from pathlib import Path
 
-import importlib.util
 import tomllib
 
 from setuptools import setup
@@ -17,15 +16,6 @@ from torch.utils.cpp_extension import (
 
 root = Path(__file__).resolve().parent
 src_dir = root / "src" / "ossm" / "csrc"
-
-
-if importlib.util.find_spec("wheel") is None:  # pragma: no cover - informative failure
-    msg = (
-        "Building ossm requires the 'wheel' package. Install it first or run "
-        "the build with isolation enabled so build-system requirements are provided."
-    )
-    raise RuntimeError(msg)
-
 
 def _relative_posix(path: Path) -> str:
     """Return a path relative to the project root using POSIX separators."""
@@ -94,5 +84,6 @@ setup(
     package_dir={'': 'src'},
     ext_modules=[extension_cls(**extension_kwargs)],
     cmdclass={"build_ext": BuildExtension},
+    setup_requires=["wheel"],
 )
 
