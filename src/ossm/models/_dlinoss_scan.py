@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Optional, Protocol, cast
 
 import torch
 from torch import Tensor
@@ -12,12 +12,29 @@ from .linoss import _run_associative_scan
 
 __all__ = ["run_dlinoss_imex1", "has_kernels", "extension_error"]
 
+class _DlinossKernels(Protocol):
+    def dlinoss_imex1_forward(
+        self, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Tensor
+    ) -> Tensor: ...
+
+    def dlinoss_imex1_backward(
+        self,
+        a_diag: Tensor,
+        g_diag: Tensor,
+        step: Tensor,
+        bu: Tensor,
+        states: Tensor,
+        grad_output: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]: ...
+
+
 try:
     from ossm import _kernels as _kernels  # type: ignore[attr-defined]
 except ImportError as exc:  # pragma: no cover - build-time failure surface
-    _kernels = None
+    _kernels: Optional[_DlinossKernels] = None
     _EXTENSION_ERROR: Optional[Exception] = exc
 else:
+    _kernels = cast("_DlinossKernels", _kernels)
     _EXTENSION_ERROR = None
 
 
@@ -88,10 +105,11 @@ class _DlinossImex1Fn(torch.autograd.Function):
         step: Tensor,
         bu: Tensor,
     ) -> Tensor:
-        if not has_kernels():
+        kernels = _kernels
+        if kernels is None:
             raise RuntimeError("D-LinOSS kernels are unavailable; cannot use optimized path.")
 
-        states = _kernels.dlinoss_imex1_forward(a_diag, g_diag, step, bu)
+        states = kernels.dlinoss_imex1_forward(a_diag, g_diag, step, bu)
         ctx.save_for_backward(a_diag, g_diag, step, bu, states)
         return states[..., 1]
 
@@ -101,7 +119,11 @@ class _DlinossImex1Fn(torch.autograd.Function):
         grad_output: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         a_diag, g_diag, step, bu, states = ctx.saved_tensors
-        grad_a, grad_g, grad_step, grad_bu = _kernels.dlinoss_imex1_backward(
+        kernels = _kernels
+        if kernels is None:
+            raise RuntimeError("D-LinOSS kernels are unavailable; cannot use optimized path.")
+
+        grad_a, grad_g, grad_step, grad_bu = kernels.dlinoss_imex1_backward(
             a_diag, g_diag, step, bu, states, grad_output.contiguous()
         )
         return grad_a, grad_g, grad_step, grad_bu
@@ -115,7 +137,7 @@ def run_dlinoss_imex1(a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Tensor) 
 
     if _use_kernels():
         try:
-            return _DlinossImex1Fn.apply(a_diag, g_diag, step, bu)
+            return cast(Tensor, _DlinossImex1Fn.apply(a_diag, g_diag, step, bu))
         except RuntimeError as exc:  # pragma: no cover - runtime device mismatch
             global _EXTENSION_ERROR
             _EXTENSION_ERROR = exc
