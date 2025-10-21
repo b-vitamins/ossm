@@ -12,7 +12,13 @@ import jax.numpy as jnp
 import jax.random as jr
 import torch
 
-from damped_linoss.models.LinOSS import DampedIMEX1Layer as JaxDampedIMEX1Layer
+try:
+    from damped_linoss.models.LinOSS import DampedIMEX1Layer as JaxDampedIMEX1Layer
+except ModuleNotFoundError as exc:  # pragma: no cover - import guard
+    raise ModuleNotFoundError(
+        "damped_linoss is required for benchmarking; install with "
+        "`pip install -e .[linoss,linoss-ref]` (and consider adding --no-deps to the latter)."
+    ) from exc
 
 from ossm.models.dlinoss import DampedLinOSSLayer
 
