@@ -52,8 +52,11 @@ def _disable_kernel(flag: bool):
             os.environ[token] = old_value
 
 
-def _to_numpy(tensor: torch.Tensor) -> jnp.ndarray:
-    return jnp.array(tensor.detach().cpu().numpy())
+def _to_jax_array(tensor: torch.Tensor, *, dtype: jnp.dtype | None = None) -> jnp.ndarray:
+    array = jnp.asarray(tensor.detach().cpu().numpy())
+    if dtype is not None and array.dtype != dtype:
+        array = array.astype(dtype)
+    return array
 
 
 def _promote_tree_to_64bits(tree):
@@ -72,15 +75,6 @@ def _build_layers(ssm_size: int, hidden_dim: int):
     torch.manual_seed(42)
     layer = DampedLinOSSLayer(ssm_size=ssm_size, hidden_dim=hidden_dim).eval()
 
-    params = {
-        "A_diag": _to_numpy(layer.A_diag),
-        "G_diag": _to_numpy(layer.G_diag),
-        "dt": _to_numpy(layer.steps),
-        "B": _to_numpy(layer.B),
-        "C": _to_numpy(layer.C),
-        "D": _to_numpy(layer.D),
-    }
-
     key = jr.PRNGKey(0)
     jax_layer = JaxDampedIMEX1Layer(
         state_dim=ssm_size,
@@ -98,12 +92,20 @@ def _build_layers(ssm_size: int, hidden_dim: int):
         key=key,
     )
 
-    object.__setattr__(jax_layer, "A_diag", params["A_diag"])
-    object.__setattr__(jax_layer, "G_diag", params["G_diag"])
-    object.__setattr__(jax_layer, "dt", params["dt"])
-    object.__setattr__(jax_layer, "B", params["B"])
-    object.__setattr__(jax_layer, "C", params["C"])
-    object.__setattr__(jax_layer, "D", params["D"])
+    torch_params = {
+        "A_diag": layer.A_diag,
+        "G_diag": layer.G_diag,
+        "dt": layer.steps,
+        "B": layer.B,
+        "C": layer.C,
+        "D": layer.D,
+    }
+
+    for name, tensor in torch_params.items():
+        target = getattr(jax_layer, name)
+        target_dtype = getattr(target, "dtype", None)
+        value = _to_jax_array(tensor, dtype=target_dtype)
+        object.__setattr__(jax_layer, name, value)
 
     return layer, jax_layer
 
@@ -153,7 +155,8 @@ def main() -> None:
     layer, jax_layer = _build_layers(ssm_size, hidden_dim)
 
     torch_input = torch.randn(1, seq_len, hidden_dim, dtype=torch.float32)
-    jax_input = _to_numpy(torch_input.squeeze(0))
+    ref_dtype = getattr(jax_layer.B, "dtype", None)
+    jax_input = _to_jax_array(torch_input.squeeze(0), dtype=ref_dtype)
 
     torch_kernel_time, torch_kernel_out = _measure_torch(layer, torch_input, disable_kernel=False)
     torch_fallback_time, torch_fallback_out = _measure_torch(layer, torch_input, disable_kernel=True)
@@ -162,7 +165,7 @@ def main() -> None:
 
     jax_time, jax_out = _measure_jax(jax_layer, jax_input)
 
-    torch_kernel_jnp = jnp.asarray(torch_kernel_out.squeeze(0).detach().cpu().numpy())
+    torch_kernel_jnp = _to_jax_array(torch_kernel_out.squeeze(0), dtype=jax_out.dtype)
     max_diff_kernel_vs_jax = jnp.max(jnp.abs(torch_kernel_jnp - jax_out)).item()
 
     # High-precision parity check
@@ -173,13 +176,9 @@ def main() -> None:
         torch_double_out = layer_double(torch_input_double)
 
     jax_layer64 = _promote_tree_to_64bits(jax_layer)
-    jax_double_in = jnp.asarray(
-        torch_input_double.squeeze(0).detach().cpu().numpy(), dtype=jnp.float64
-    )
+    jax_double_in = _to_jax_array(torch_input_double.squeeze(0), dtype=jnp.float64)
     jax_double_out = jax_layer64(jax_double_in)
-    torch_double_jnp = jnp.asarray(
-        torch_double_out.squeeze(0).detach().cpu().numpy(), dtype=jnp.float64
-    )
+    torch_double_jnp = _to_jax_array(torch_double_out.squeeze(0), dtype=jnp.float64)
     max_diff_double = jnp.max(jnp.abs(torch_double_jnp - jax_double_out)).item()
 
     print("Damped LinOSS IMEX1 Benchmark")
