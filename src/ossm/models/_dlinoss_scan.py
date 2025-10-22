@@ -84,6 +84,22 @@ def extension_error() -> Optional[Exception]:
 def _use_kernels() -> bool:
     if os.environ.get("OSSM_DLINOSS_DISABLE_KERNEL"):
         return False
+
+    try:  # pragma: no cover - ``torch._dynamo`` may be absent on older builds
+        import torch._dynamo as _torch_dynamo  # type: ignore[attr-defined]
+
+        if _torch_dynamo.is_compiling():
+            # ``torch.compile`` drives tracing with ``FakeTensor`` instances
+            # that deliberately lack storage.  The custom kernels expect real
+            # storage so we fall back to the pure PyTorch reference when the
+            # graph is being captured.  ``torch`` will then trace the fallback
+            # implementation directly, producing a graph that is agnostic to
+            # the extension while the eager path continues to benefit from the
+            # optimized kernels.
+            return False
+    except ImportError:
+        pass
+
     return has_kernels()
 
 
