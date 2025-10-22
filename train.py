@@ -43,12 +43,13 @@ COLLATE_FNS = {
     "path": path_collate,
 }
 
-AVAILABLE_MODELS = ("linoss_im", "dlinoss_imex1", "s5", "lru", "ncde", "rnn")
-AVAILABLE_HEADS = ("classification", "regression")
+AVAILABLE_MODELS = ("linoss_im", "dlinoss_imex1", "s5", "lru", "ncde", "rnn", "dlinossrec")
+AVAILABLE_HEADS = ("classification", "regression", "tiedsoftmax")
+AVAILABLE_TASKS = ("classification", "regression", "seqrec")
 # NOTE: Dataset view options are determined by the dataset implementation, not
 # the dataloader collate functions. Enumerate the supported UEA views explicitly
 # so "raw" remains selectable even though there is no matching collate fn.
-AVAILABLE_VIEWS = ("raw", "coeff", "path")
+AVAILABLE_VIEWS = ("raw", "coeff", "path", "seqrec")
 AVAILABLE_OPTIMIZERS = ("adamw",)
 AVAILABLE_SCHEDULERS = ("none",)
 
@@ -455,7 +456,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     model_group.add_argument(
         "--task",
         default=None,
-        choices=AVAILABLE_HEADS,
+        choices=AVAILABLE_TASKS,
         help="Training objective; defaults to the selected head.",
     )
     model_group.add_argument(
@@ -485,7 +486,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     )
     data_group.add_argument(
         "--dataset-view",
-        default="coeff",
+        default=None,
         choices=AVAILABLE_VIEWS,
         help="Dataset representation to materialise.",
     )
@@ -709,47 +710,83 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     args, unknown = parser.parse_known_args(argv_list)
 
     device_flag = False
+    head_flag = False
+    model_flag = False
+    dataset_view_flag = False
+    task_flag = False
     for entry in argv_list:
         if entry == "--device" or entry.startswith("--device="):
             device_flag = True
-            break
+        if entry == "--head" or entry.startswith("--head="):
+            head_flag = True
+        if entry == "--model" or entry.startswith("--model=") or entry.startswith("--backbone="):
+            model_flag = True
+        if entry == "--dataset-view" or entry.startswith("--dataset-view="):
+            dataset_view_flag = True
+        if entry == "--task" or entry.startswith("--task="):
+            task_flag = True
+
+    if args.task is None and args.head == "tiedsoftmax":
+        args.task = "seqrec"
+
+    if args.task == "seqrec":
+        if not model_flag:
+            args.model = "dlinossrec"
+        if not head_flag:
+            args.head = "tiedsoftmax"
+        if not dataset_view_flag:
+            args.dataset_view = "seqrec"
 
     setattr(args, "_device_from_cli", device_flag)
+    setattr(args, "_head_from_cli", head_flag)
+    setattr(args, "_model_from_cli", model_flag)
+    setattr(args, "_dataset_view_from_cli", dataset_view_flag)
+    setattr(args, "_task_from_cli", task_flag)
     return args, unknown
 
 
 def _compose_config(args: argparse.Namespace, extra_overrides: Sequence[str]) -> DictConfig:
-    task = args.task or args.head
+    task = args.task if args.task is not None else args.head
+    if task != "seqrec" and args.model == "dlinossrec":
+        raise ValueError("Model 'dlinossrec' requires --task seqrec.")
+    if task != "seqrec" and args.head == "tiedsoftmax":
+        raise ValueError("Head 'tiedsoftmax' requires --task seqrec.")
+
     overrides: List[str] = [
         f"model={args.model}",
         f"head={args.head}",
         f"optimizer={args.optimizer}",
         f"scheduler={args.scheduler}",
         f"training={task}",
-        f"dataset.name={args.dataset_name}",
-        f"dataset.view={args.dataset_view}",
         f"dataset.split={args.train_split}",
     ]
+    if task == "seqrec":
+        overrides.append(f"dataset={args.dataset_name}")
+    overrides.append(f"dataset.name={args.dataset_name}")
+    if args.dataset_view is not None:
+        overrides.append(f"dataset.view={args.dataset_view}")
 
     val_name = args.val_name or args.dataset_name
-    val_view = args.val_view or args.dataset_view
-    overrides.extend(
-        [
-            f"validation_dataset.name={val_name}",
-            f"validation_dataset.view={val_view}",
-            f"validation_dataset.split={args.val_split}",
-        ]
-    )
+    if task == "seqrec":
+        overrides.append(f"validation_dataset={val_name}")
+    overrides.append(f"validation_dataset.name={val_name}")
+    if args.val_view is not None:
+        overrides.append(f"validation_dataset.view={args.val_view}")
+    elif args.dataset_view is not None:
+        overrides.append(f"validation_dataset.view={args.dataset_view}")
+    overrides.append(f"validation_dataset.split={args.val_split}")
 
     test_name = args.test_name or val_name
-    test_view = args.test_view or val_view
-    overrides.extend(
-        [
-            f"test_dataset.name={test_name}",
-            f"test_dataset.view={test_view}",
-            f"test_dataset.split={args.test_split}",
-        ]
-    )
+    if task == "seqrec":
+        overrides.append(f"test_dataset={test_name}")
+    overrides.append(f"test_dataset.name={test_name}")
+    if args.test_view is not None:
+        overrides.append(f"test_dataset.view={args.test_view}")
+    elif args.val_view is not None:
+        overrides.append(f"test_dataset.view={args.val_view}")
+    elif args.dataset_view is not None:
+        overrides.append(f"test_dataset.view={args.dataset_view}")
+    overrides.append(f"test_dataset.split={args.test_split}")
 
     if args.dataset_root:
         overrides.append(f"paths.data_root={args.dataset_root}")
@@ -760,14 +797,32 @@ def _compose_config(args: argparse.Namespace, extra_overrides: Sequence[str]) ->
         overrides.append(f"dataloader.collate={args.collate}")
     if args.batch_size is not None:
         overrides.append(f"dataloader.batch_size={args.batch_size}")
+        if task == "seqrec":
+            overrides.append(f"training.batch_size={args.batch_size}")
     if args.num_workers is not None:
         overrides.append(f"dataloader.num_workers={args.num_workers}")
+        if task == "seqrec":
+            overrides.extend(
+                [
+                    f"dataset.num_workers={args.num_workers}",
+                    f"validation_dataset.num_workers={args.num_workers}",
+                    f"test_dataset.num_workers={args.num_workers}",
+                ]
+            )
     if args.prefetch_factor is not None:
         overrides.append(f"dataloader.prefetch_factor={args.prefetch_factor}")
     if args.persistent_workers:
         overrides.append("dataloader.persistent_workers=true")
     if args.pin_memory:
         overrides.append("dataloader.pin_memory=true")
+        if task == "seqrec":
+            overrides.extend(
+                [
+                    "dataset.pin_memory=true",
+                    "validation_dataset.pin_memory=true",
+                    "test_dataset.pin_memory=true",
+                ]
+            )
     if args.pin_memory_device:
         overrides.append(f"dataloader.pin_memory_device={args.pin_memory_device}")
     if args.drop_last:

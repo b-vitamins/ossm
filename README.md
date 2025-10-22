@@ -206,7 +206,9 @@ are grouped by intent:
   `--eval-interval`, `--prefetch-gpu`, `--prefetch-depth`, `--cudnn-benchmark`.
 - **Runtime**: `--device`, `--seed`, `--work-dir`, `--dataset-root`.
 
-When the CLI is not sufficient you can still fall back to Hydra overrides:
+The CLI surfaces everything needed for the sequential recommender as well—use
+`--task seqrec` alongside `--model dlinossrec --head tiedsoftmax`—but you can
+still fall back to Hydra overrides for niche adjustments:
 
 ```bash
 python train.py training.max_steps=5000 model.params.hidden_dim=256
@@ -260,13 +262,14 @@ and can be reproduced on CPU (for smoke tests) or GPU (for full-scale runs).
    ```bash
    # Example: CPU-friendly sanity check on Amazon Beauty
    python train.py \
-     training=seqrec \
-     dataset=amazonbeauty validation_dataset=amazonbeauty test_dataset=amazonbeauty \
-     model=dlinossrec head=tiedsoftmax \
-     training.device=cpu training.amp=false training.epochs=2 training.batch_size=64 \
-     dataset.num_workers=0 validation_dataset.num_workers=0 test_dataset.num_workers=0 \
-     model.d_model=32 model.ssm_size=64 \
-     | tee reports/amazonbeauty_seqrec.log
+     --task seqrec \
+     --model dlinossrec \
+     --head tiedsoftmax \
+     --dataset-name amazonbeauty \
+     --device cpu \
+     --epochs 2 \
+     --batch-size 64 \
+     --num-workers 0
    ```
 
    The progress reporter prints step-level loss, throughput, validation ranking

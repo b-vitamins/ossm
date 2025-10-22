@@ -80,6 +80,8 @@ def build_dataloaders(
 
     num_workers = int(dataset_cfg.get("num_workers", 0))
     pin_memory = bool(dataset_cfg.get("pin_memory", False))
+    if not torch.cuda.is_available():
+        pin_memory = False
 
     train_loader = DataLoader(
         train_dataset,
