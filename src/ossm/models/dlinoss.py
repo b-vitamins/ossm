@@ -185,15 +185,24 @@ class DampedLinOSSLayer(nn.Module):
         device = inputs.device
         dtype = inputs.dtype
 
-        a_diag, g_diag, step = self._project_parameters(device=device, dtype=dtype)
+        compute_dtype = dtype
+        if dtype in (torch.float16, torch.bfloat16):
+            compute_dtype = torch.float32
 
-        b_real = self.B[..., 0].to(device=device, dtype=dtype)
-        b_imag = self.B[..., 1].to(device=device, dtype=dtype)
-        c_real = self.C[..., 0].to(device=device, dtype=dtype)
-        c_imag = self.C[..., 1].to(device=device, dtype=dtype)
-        d_vec = self.D.to(device=device, dtype=dtype)
+        a_diag, g_diag, step = self._project_parameters(device=device, dtype=compute_dtype)
 
-        flat_inputs = inputs.reshape(batch * length, hidden_dim)
+        b_real = self.B[..., 0].to(device=device, dtype=compute_dtype)
+        b_imag = self.B[..., 1].to(device=device, dtype=compute_dtype)
+        c_real = self.C[..., 0].to(device=device, dtype=compute_dtype)
+        c_imag = self.C[..., 1].to(device=device, dtype=compute_dtype)
+        d_vec = self.D.to(device=device, dtype=compute_dtype)
+
+        if compute_dtype == dtype:
+            layer_inputs = inputs
+        else:
+            layer_inputs = inputs.to(dtype=compute_dtype)
+
+        flat_inputs = layer_inputs.reshape(batch * length, hidden_dim)
         b_real_t = b_real.transpose(0, 1)
         b_imag_t = b_imag.transpose(0, 1)
         bu_real = flat_inputs @ b_real_t
@@ -210,8 +219,11 @@ class DampedLinOSSLayer(nn.Module):
         c_imag_t = c_imag.transpose(0, 1)
         projected_real = states_real @ c_real_t - states_imag @ c_imag_t
         projected = projected_real.reshape(batch, length, self.hidden_dim)
-        du = inputs * d_vec
-        return projected + du
+        du = layer_inputs * d_vec
+        outputs = projected + du
+        if compute_dtype == dtype:
+            return outputs
+        return outputs.to(dtype=dtype)
 
     def _project_parameters(self, *, device: torch.device, dtype: torch.dtype) -> Tuple[Tensor, Tensor, Tensor]:
         a_diag = self.A_diag.to(device=device, dtype=dtype)
