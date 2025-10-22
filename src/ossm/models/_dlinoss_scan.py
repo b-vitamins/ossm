@@ -37,6 +37,32 @@ else:
     _kernels = cast("_DlinossKernels", _kernels)
     _EXTENSION_ERROR = None
 
+    # Enable ``torch.compile`` and Dynamo to treat the PyCapsule entry points as
+    # graph-friendly primitives instead of emitting loud warnings during
+    # tracing.  The helpers are optional so we guard them defensively to keep
+    # import-time behavior identical on older PyTorch wheels.
+    try:  # pragma: no cover - import guard only exercised with recent PyTorch
+        import torch._dynamo as _torch_dynamo  # type: ignore[attr-defined]
+
+        try:
+            _torch_dynamo.allow_in_graph(_kernels.dlinoss_imex1_forward)
+            _torch_dynamo.allow_in_graph(_kernels.dlinoss_imex1_backward)
+        except AttributeError:
+            pass
+    except ImportError:  # pragma: no cover - dependency not present
+        pass
+
+    try:  # pragma: no cover - ``torch.compiler`` may be unavailable
+        import torch.compiler as _torch_compiler  # type: ignore[attr-defined]
+
+        try:
+            _torch_compiler.allow_in_graph(_kernels.dlinoss_imex1_forward)
+            _torch_compiler.allow_in_graph(_kernels.dlinoss_imex1_backward)
+        except AttributeError:
+            pass
+    except ImportError:
+        pass
+
 
 def _trace(message: str) -> None:
     if os.environ.get("OSSM_DLINOSS_TRACE"):
