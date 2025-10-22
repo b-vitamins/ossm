@@ -94,9 +94,10 @@ def build_dataloaders(
         collate_fn=partial(collate_left_pad, max_len=max_len),
         drop_last=False,
     )
+    eval_batch_size = int(cfg.training.get("eval_batch_size", cfg.training.batch_size))
     val_loader = DataLoader(
         val_dataset,
-        batch_size=int(cfg.training.batch_size),
+        batch_size=eval_batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -104,7 +105,7 @@ def build_dataloaders(
     )
     test_loader = DataLoader(
         test_dataset,
-        batch_size=int(cfg.training.batch_size),
+        batch_size=eval_batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,

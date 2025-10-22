@@ -33,15 +33,25 @@ def _load_raw(path: Path) -> pd.DataFrame:
     raise FileNotFoundError("Unable to locate ratings.dat or ratings.csv in the provided directory")
 
 
-def _build_splits(df: pd.DataFrame, min_interactions: int) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray, int]:
+def _build_splits(
+    df: pd.DataFrame,
+    min_user_interactions: int,
+    min_item_interactions: int,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray, int]:
     df = df[df["rating"] >= MIN_RATING].copy()
     df.sort_values(["user_id", "timestamp"], inplace=True)
+    item_counts = df["item_id"].value_counts()
+    threshold = max(int(min_item_interactions), 1)
+    keep_items = item_counts[item_counts >= threshold].index
+    if keep_items.empty:
+        raise ValueError("No items meet the minimum interaction threshold")
+    df = df[df["item_id"].isin(keep_items)]
     grouped = df.groupby("user_id", sort=False)
 
     kept_users: List[int] = []
     frames: List[pd.DataFrame] = []
     for user_id, group in grouped:
-        if len(group) < max(min_interactions, 3):
+        if len(group) < max(min_user_interactions, 3):
             continue
         frames.append(group)
         kept_users.append(user_id)
@@ -106,14 +116,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw", type=Path, required=True, help="Path to the raw ml-1m directory")
     parser.add_argument("--out", type=Path, required=True, help="Directory where the processed data will be stored")
     parser.add_argument("--min-interactions", type=int, default=5, help="Minimum interactions per user")
+    parser.add_argument(
+        "--min-item-interactions",
+        type=int,
+        default=None,
+        help="Minimum interactions per item (defaults to --min-interactions)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     df = _load_raw(args.raw)
+    min_item = args.min_item_interactions if args.min_item_interactions is not None else args.min_interactions
     train_df, val_df, test_df, user_ptr, train_items, num_items = _build_splits(
-        df, min_interactions=args.min_interactions
+        df,
+        min_user_interactions=args.min_interactions,
+        min_item_interactions=min_item,
     )
     _write_outputs(args.out, train_df, val_df, test_df, user_ptr, train_items, num_items)
     summary = {

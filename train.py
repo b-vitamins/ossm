@@ -713,6 +713,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         help="Enable cuDNN benchmark autotuning (GPU only).",
     )
 
+    eval_group = parser.add_argument_group("Evaluation")
+    eval_group.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=None,
+        help="Override validation/test batch size.",
+    )
+
     runtime_group = parser.add_argument_group("Runtime")
     runtime_group.add_argument(
         "--seed",
@@ -829,6 +837,8 @@ def _compose_config(args: argparse.Namespace, extra_overrides: Sequence[str]) ->
         overrides.append(f"dataloader.batch_size={args.batch_size}")
         if task == "seqrec":
             overrides.append(f"training.batch_size={args.batch_size}")
+    if args.eval_batch_size is not None and task == "seqrec":
+        overrides.append(f"training.eval_batch_size={args.eval_batch_size}")
     if args.num_workers is not None:
         overrides.append(f"dataloader.num_workers={args.num_workers}")
         if task == "seqrec":
