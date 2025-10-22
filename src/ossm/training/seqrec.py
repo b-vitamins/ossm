@@ -85,6 +85,12 @@ def build_dataloaders(
     if not torch.cuda.is_available():
         pin_memory = False
 
+    eval_batch_size_cfg = cfg.training.get("eval_batch_size")
+    if eval_batch_size_cfg is None:
+        eval_batch_size = int(cfg.training.batch_size)
+    else:
+        eval_batch_size = int(eval_batch_size_cfg)
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=int(cfg.training.batch_size),
@@ -96,7 +102,7 @@ def build_dataloaders(
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=int(cfg.training.batch_size),
+        batch_size=eval_batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -104,7 +110,7 @@ def build_dataloaders(
     )
     test_loader = DataLoader(
         test_dataset,
-        batch_size=int(cfg.training.batch_size),
+        batch_size=eval_batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
