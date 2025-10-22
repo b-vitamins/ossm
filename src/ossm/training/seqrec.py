@@ -330,6 +330,8 @@ def evaluate_fullsort(
     topk: int,
     split_name: str = "",
     log_predictions: bool = False,
+    max_batches: int | None = None,
+    verbose: bool = False,
 ) -> Dict[str, float]:
     model.eval()
     accumulator = TopKMetricAccumulator(topk=topk)
@@ -353,6 +355,8 @@ def evaluate_fullsort(
             min_candidates = min(min_candidates, int(candidate_counts.min().item()))
             max_candidates = max(max_candidates, int(candidate_counts.max().item()))
         batch_count += 1
+        if max_batches is not None and batch_count >= int(max_batches):
+            break
         if log_predictions and first_batch_debug is None:
             topn = min(10, scores.size(1))
             top_scores, top_indices = torch.topk(scores, topn, dim=1)
@@ -373,17 +377,18 @@ def evaluate_fullsort(
         expected_batches = len(loader)
     except TypeError:  # pragma: no cover - streaming loader guard
         expected_batches = None
-    coverage_message = "Eval coverage"
-    if split_name:
-        coverage_message += f" • split={split_name}"
-    coverage_message += f" • batches={batch_count}"
-    if expected_batches is not None:
-        coverage_message += f"/{expected_batches}"
-    coverage_message += (
-        f" • examples={total_examples}"
-        f" • candidates(min/mean/max)={min_candidates}/{average_candidates:.1f}/{max_candidates}"
-    )
-    print(coverage_message)
+    if verbose:
+        coverage_message = "Eval coverage"
+        if split_name:
+            coverage_message += f" • split={split_name}"
+        coverage_message += f" • batches={batch_count}"
+        if expected_batches is not None:
+            coverage_message += f"/{expected_batches}"
+        coverage_message += (
+            f" • examples={total_examples}"
+            f" • candidates(min/mean/max)={min_candidates}/{average_candidates:.1f}/{max_candidates}"
+        )
+        print(coverage_message)
     if min_candidates < topk:
         raise RuntimeError(
             "Evaluation candidate pool is smaller than training.topk. "
@@ -391,7 +396,7 @@ def evaluate_fullsort(
             "The bundled smoke-test data masks almost every item; prepare the full dataset "
             "with scripts/prepare_*.py or reduce training.topk."
         )
-    if log_predictions and first_batch_debug is not None:
+    if verbose and log_predictions and first_batch_debug is not None:
         print(
             "Eval predictions • "
             f"split={split_name or 'eval'} • batch=0 • topk={first_batch_debug['top_indices'].size(1)}"
@@ -556,6 +561,12 @@ def main(cfg: DictConfig) -> None:
     best_peak_gb = 0.0
     global_step = 0
     topk = int(cfg.training.topk)
+    eval_interval_cfg = cfg.training.get("eval_interval")
+    eval_interval: int | None = int(eval_interval_cfg) if eval_interval_cfg not in (None, False, 0) else None
+    max_eval_batches_cfg = cfg.training.get("limit_val_batches")
+    max_eval_batches: int | None = (
+        int(max_eval_batches_cfg) if max_eval_batches_cfg not in (None, False, 0) else None
+    )
 
     for epoch in range(epochs):
         if global_step >= total_steps:
@@ -566,7 +577,7 @@ def main(cfg: DictConfig) -> None:
         epoch_loss = 0.0
         epoch_examples = 0
         model.train()
-        for batch in train_loader:
+        for b_idx, batch in enumerate(train_loader, start=1):
             if global_step >= total_steps:
                 break
             optimizer.zero_grad(set_to_none=True)
@@ -592,25 +603,76 @@ def main(cfg: DictConfig) -> None:
                 print(f"LR step • step={global_step} • lr={current_lr:.6e}")
 
             if trace_path is not None and (trace_limit <= 0 or global_step <= trace_limit):
-                trace_records.append(
-                    {
-                        "step": global_step,
-                        "epoch": epoch + 1,
-                        "loss": loss_value,
-                        "batch_size": batch_size,
-                        "lr": float(optimizer.param_groups[0]["lr"]),
-                    }
-                )
+                trace_entry = {
+                    "step": global_step,
+                    "epoch": epoch + 1,
+                    "loss": loss_value,
+                    "batch_size": batch_size,
+                    "lr": float(optimizer.param_groups[0]["lr"]),
+                }
+                if device.type == "cuda" and torch.cuda.is_available():
+                    trace_entry["gpu_alloc_gb"] = float(torch.cuda.memory_allocated(device) / 1e9)
+                    trace_entry["gpu_peak_gb"] = float(
+                        torch.cuda.max_memory_allocated(device) / 1e9
+                    )
+                # Include latest eval snapshot if available
+                if "val" in last_eval:
+                    for k, v in last_eval["val"].items():
+                        trace_entry[f"{k}(val)"] = float(v)
+                trace_records.append(trace_entry)
 
-            if global_step % log_interval == 0 or global_step == total_steps:
+            if (b_idx % log_interval == 0) or global_step == total_steps:
                 metrics: Dict[str, float] = {}
                 if epoch_examples:
                     metrics["Loss(epoch)"] = epoch_loss / epoch_examples
+                # Surface last seen eval metrics inline for quick monitoring
                 for split_name, metric_dict in last_eval.items():
                     for metric_name, metric_value in metric_dict.items():
                         metrics[f"{metric_name}({split_name})"] = metric_value
+                # Add lightweight GPU telemetry if available
+                if (
+                    device.type == "cuda" and torch.cuda.is_available() and bool(cfg.training.get("log_gpu", False))
+                ):
+                    mem_alloc = torch.cuda.memory_allocated(device) / 1e9
+                    mem_peak = torch.cuda.max_memory_allocated(device) / 1e9
+                    try:
+                        total_mem = torch.cuda.get_device_properties(device).total_memory / 1e9  # type: ignore[attr-defined]
+                    except Exception:
+                        total_mem = 0.0
+                    if total_mem > 0:
+                        metrics["GPU(alloc%)"] = 100.0 * (mem_alloc / total_mem)
+                    metrics["GPU(alloc)GB"] = mem_alloc
+                    metrics["GPU(peak)GB"] = mem_peak
                 lr = optimizer.param_groups[0]["lr"]
-                progress.log(global_step, loss_value, metrics=metrics or None, lr=lr)
+                progress.log(
+                    global_step,
+                    loss_value,
+                    metrics=metrics or None,
+                    lr=lr,
+                    epoch=epoch + 1,
+                    total_epochs=epochs,
+                    epoch_step=b_idx,
+                    epoch_size=batches_per_epoch,
+                    prefer_epoch=True,
+                )
+
+            # Optional mid-epoch evaluation based on training.eval_interval
+            if eval_interval is not None and (global_step % eval_interval == 0) and global_step < total_steps:
+                val_metrics = evaluate_fullsort(
+                    model,
+                    val_loader,
+                    seen_items.get("val", {}),
+                    device,
+                    topk=topk,
+                    split_name="val",
+                    log_predictions=False,
+                    max_batches=max_eval_batches,
+                )
+                last_eval["val"] = val_metrics
+                print(
+                    f"Eval epoch {epoch + 1:03d} • batch={b_idx}/{batches_per_epoch} • "
+                    f"{_format_split_metrics('val', val_metrics)}"
+                )
 
         if device.type == "cuda" and torch.cuda.is_available():
             torch.cuda.synchronize(device)
@@ -623,16 +685,14 @@ def main(cfg: DictConfig) -> None:
             device,
             topk=topk,
             split_name="val",
-            log_predictions=(epoch == 0),
+            log_predictions=bool(cfg.training.get("log_predictions", False)) and (epoch == 0),
+            verbose=bool(cfg.training.get("eval_verbose", False)),
         )
         if device.type == "cuda" and torch.cuda.is_available():
             torch.cuda.synchronize(device)
         val_time = time.perf_counter() - val_start
         last_eval["val"] = val_metrics
-        print(
-            f"Eval step {global_step:05d} • {_format_split_metrics('val', val_metrics)} "
-            f"• time={format_duration(val_time)}"
-        )
+        print(f"Eval epoch {epoch + 1:03d} • {_format_split_metrics('val', val_metrics)}")
         if trace_path is not None:
             trace_eval_records.append(
                 {
