@@ -43,7 +43,7 @@ COLLATE_FNS = {
     "path": path_collate,
 }
 
-AVAILABLE_MODELS = ("linoss_im", "dlinoss_imex1", "s5", "lru", "ncde", "rnn", "dlinossrec")
+AVAILABLE_MODELS = ("linoss_im", "dlinoss_imex1", "s5", "lru", "ncde", "rnn", "dlinossrec", "mambarec")
 AVAILABLE_HEADS = ("classification", "regression", "tiedsoftmax")
 AVAILABLE_TASKS = ("classification", "regression", "seqrec")
 # NOTE: Dataset view options are determined by the dataset implementation, not
@@ -783,8 +783,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
 
 def _compose_config(args: argparse.Namespace, extra_overrides: Sequence[str]) -> DictConfig:
     task = args.task if args.task is not None else args.head
-    if task != "seqrec" and args.model == "dlinossrec":
-        raise ValueError("Model 'dlinossrec' requires --task seqrec.")
+    if task != "seqrec" and args.model in {"dlinossrec", "mambarec"}:
+        raise ValueError(f"Model '{args.model}' requires --task seqrec.")
     if task != "seqrec" and args.head == "tiedsoftmax":
         raise ValueError("Head 'tiedsoftmax' requires --task seqrec.")
 
