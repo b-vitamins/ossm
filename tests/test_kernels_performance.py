@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple, cast
-from unittest import mock
+from typing import Any, Callable, Optional, Tuple, cast
 
 import pytest
 import torch
 from torch import Tensor
 from torch.utils import benchmark
 
+import ossm.models._dlinoss_scan as _dlinoss_scan_module
 from ossm.models._dlinoss_scan import has_kernels as _dlinoss_has_kernels
-from ossm.models._dlinoss_scan import run_dlinoss_imex1
 from ossm.models._linoss_scan import try_run_scan as _linoss_try_run_scan
 from ossm.models._lru_scan import try_run_lru_scan
 from ossm.models._rnn_scan import try_run_linear_rnn_scan
@@ -247,17 +245,33 @@ def _setup_dlinoss_case(
         bu_imag = torch.randn(length, batch, ssm, dtype=torch.float32, device=device)
         bu = torch.complex(bu_real, bu_imag)
 
+        kernels = cast(Any, getattr(_dlinoss_scan_module, "_kernels", None))
+        if kernels is None or not hasattr(kernels, "dlinoss_imex1_forward"):
+            return None, None, "D-LinOSS kernel is unavailable"
+
+        fallback_fn = getattr(_dlinoss_scan_module, "_fallback_dlinoss_imex1", None)
+        if fallback_fn is None:
+            return None, None, "D-LinOSS fallback path is unavailable"
+
+        a_diag = a_diag.contiguous()
+        g_diag = g_diag.contiguous()
+        step = step.contiguous()
+        bu = bu.contiguous()
+
         try:
-            _ = run_dlinoss_imex1(a_diag, g_diag, step, bu)
+            with torch.no_grad():
+                kernels.dlinoss_imex1_forward(a_diag, g_diag, step, bu)
         except RuntimeError:
             return None, None, "D-LinOSS kernel execution failed"
 
         def run_extension() -> Tensor:
-            return cast(Tensor, run_dlinoss_imex1(a_diag, g_diag, step, bu))
+            with torch.no_grad():
+                states = cast(Tensor, kernels.dlinoss_imex1_forward(a_diag, g_diag, step, bu))
+                return states[..., 1]
 
         def run_reference() -> Tensor:
-            with mock.patch.dict(os.environ, {"OSSM_DLINOSS_DISABLE_KERNEL": "1"}):
-                return run_dlinoss_imex1(a_diag, g_diag, step, bu)
+            with torch.no_grad():
+                return cast(Tensor, fallback_fn(a_diag, g_diag, step, bu))
 
         return run_extension, run_reference, None
 
