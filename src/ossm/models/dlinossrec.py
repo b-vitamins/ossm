@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
+from torch.nn import ModuleList
 
 from .dlinoss import DampedLinOSSBlock
 from .heads import TiedSoftmaxHead
@@ -35,13 +36,17 @@ class ItemEmbeddingEncoder(nn.Module):
         self.norm = nn.LayerNorm(d_model) if use_layernorm else nn.Identity()
         self.use_positional = use_pos_emb
         self.max_len = int(max_len)
+        self.position_embedding: nn.Embedding | None
+        self.position_ids: torch.Tensor | None
         if use_pos_emb:
             self.position_embedding = nn.Embedding(self.max_len, d_model)
             position_ids = torch.arange(self.max_len).unsqueeze(0)
             self.register_buffer("position_ids", position_ids, persistent=False)
+            self.position_ids = position_ids
         else:
-            self.register_parameter("position_embedding", None)
+            self.position_embedding = None
             self.register_buffer("position_ids", None, persistent=False)
+            self.position_ids = None
 
     def forward(self, input_ids: torch.LongTensor) -> torch.Tensor:
         embeddings = self.embedding(input_ids)
@@ -103,7 +108,7 @@ class Dlinoss4Rec(nn.Module):
             use_layernorm=use_layernorm,
             use_pos_emb=use_pos_emb,
         )
-        self.blocks = nn.ModuleList(
+        self.blocks = ModuleList(
             [
                 DampedLinOSSBlock(
                     ssm_size,
@@ -114,9 +119,9 @@ class Dlinoss4Rec(nn.Module):
                 for _ in range(blocks)
             ]
         )
-        self.pffn_blocks: Optional[nn.ModuleList]
+        self.pffn_blocks: ModuleList | None
         if use_pffn:
-            self.pffn_blocks = nn.ModuleList(
+            self.pffn_blocks = ModuleList(
                 [_FeedForwardBlock(d_model, dropout, use_layernorm) for _ in range(blocks)]
             )
         else:
@@ -128,14 +133,14 @@ class Dlinoss4Rec(nn.Module):
             padding_idx=0,
         )
 
-    def forward_features(
-        self, input_ids: torch.LongTensor, mask: torch.BoolTensor
-    ) -> torch.Tensor:
+    def forward_features(self, input_ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         features = self.encoder(input_ids)
-        for idx, block in enumerate(self.blocks):
-            features = block(features)
-            if self.pffn_blocks is not None:
-                features = self.pffn_blocks[idx](features)
+        if self.pffn_blocks is None:
+            for block in self.blocks:
+                features = block(features)
+        else:
+            for block, ffn in zip(self.blocks, self.pffn_blocks):
+                features = ffn(block(features))
         lengths = mask.sum(dim=1)
         last_index = lengths.clamp(min=1) - 1
         batch_indices = torch.arange(features.size(0), device=features.device)

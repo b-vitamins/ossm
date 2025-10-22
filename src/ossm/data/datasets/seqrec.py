@@ -9,7 +9,6 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import torch
-from torch import LongTensor
 from torch.utils.data import Dataset
 
 __all__ = [
@@ -24,10 +23,10 @@ __all__ = [
 class SeqRecBatch:
     """Container holding a mini-batch for sequential recommendation."""
 
-    input_ids: LongTensor
-    target: LongTensor
-    mask: torch.BoolTensor
-    user_ids: LongTensor
+    input_ids: torch.Tensor
+    target: torch.Tensor
+    mask: torch.Tensor
+    user_ids: torch.Tensor
 
     def to(
         self, device: torch.device | str, *, non_blocking: bool = True
@@ -135,8 +134,10 @@ class SeqRecEvalDataset(Dataset[Tuple[int, List[int], int]]):
             if not val_path.exists():
                 raise FileNotFoundError("val.parquet is required to build test contexts")
             val_df = pd.read_parquet(val_path)
+            val_user_ids = val_df["user_id"].to_numpy(dtype=np.int64, copy=False)
+            val_targets = val_df["target_id"].to_numpy(dtype=np.int64, copy=False)
             self._val_targets: Dict[int, int] = {
-                int(row.user_id): int(row.target_id) for row in val_df.itertuples()
+                int(user_id): int(target) for user_id, target in zip(val_user_ids, val_targets)
             }
         else:
             self._val_targets = {}
@@ -148,11 +149,16 @@ class SeqRecEvalDataset(Dataset[Tuple[int, List[int], int]]):
 
         self._examples: List[Tuple[int, List[int], int]] = []
         self._contexts: Dict[int, Tuple[int, ...]] = {}
-        self._histories: Dict[int, torch.LongTensor] = {}
-        for row in df.itertuples():
-            user_id = int(row.user_id)
-            prefix_len = int(row.prefix_len)
-            target = int(row.target_id)
+        self._histories: Dict[int, torch.Tensor] = {}
+        user_column = df["user_id"].to_numpy(dtype=np.int64, copy=False)
+        prefix_column = df["prefix_len"].to_numpy(dtype=np.int64, copy=False)
+        target_column = df["target_id"].to_numpy(dtype=np.int64, copy=False)
+        for user_id_raw, prefix_raw, target_raw in zip(
+            user_column, prefix_column, target_column
+        ):
+            user_id = int(user_id_raw)
+            prefix_len = int(prefix_raw)
+            target = int(target_raw)
             train_seq = self._user_sequences[user_id]
             context = train_seq[:min(prefix_len, len(train_seq))]
             if self.split == "test" and prefix_len > len(train_seq):
@@ -186,7 +192,7 @@ class SeqRecEvalDataset(Dataset[Tuple[int, List[int], int]]):
     def context_for_user(self, user_id: int) -> List[int]:
         return list(self._contexts[user_id])
 
-    def history_tensor(self, user_id: int) -> torch.LongTensor:
+    def history_tensor(self, user_id: int) -> torch.Tensor:
         return self._histories[user_id]
 
 
@@ -207,7 +213,9 @@ def collate_left_pad(samples: Iterable[Tuple[int, Sequence[int], int]], max_len:
         trimmed = list(context)[-max_len:]
         length = len(trimmed)
         if length:
-            padded[row, max_len - length :] = torch.tensor(trimmed, dtype=torch.long)
+            padded[row, max_len - length :].copy_(
+                torch.as_tensor(trimmed, dtype=torch.long)
+            )
             mask[row, max_len - length :] = True
         targets[row] = int(target)
         user_ids[row] = int(user_id)

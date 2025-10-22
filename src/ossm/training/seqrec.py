@@ -8,13 +8,12 @@ import random
 import time
 from functools import partial
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, ContextManager, Dict, Tuple
 
 import numpy as np
 import torch
 from hydra.utils import to_absolute_path  # type: ignore[import]
 from omegaconf import DictConfig, OmegaConf  # type: ignore[import]
-from torch import amp
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
@@ -22,6 +21,35 @@ from ..data.datasets import SeqRecEvalDataset, SeqRecTrainDataset, collate_left_
 from ..metrics import TopKMetricAccumulator, mask_history_inplace
 from ..models.dlinossrec import Dlinoss4Rec
 from .progress import ProgressReporter, format_duration
+
+# Resolve AMP utilities in a version-tolerant manner without triggering type-checker errors.
+_torch_amp = getattr(torch, "amp", None)
+if _torch_amp is not None and hasattr(_torch_amp, "GradScaler") and hasattr(
+    _torch_amp, "autocast"
+):  # pragma: no cover - runtime feature detection
+    _GradScaler = getattr(_torch_amp, "GradScaler")
+    _autocast = getattr(_torch_amp, "autocast")
+else:  # pragma: no cover - fallback for older torch
+    from torch.cuda.amp import GradScaler as _GradScaler  # type: ignore[import]
+    from torch.cuda.amp import autocast as _autocast  # type: ignore[import]
+
+
+def _make_grad_scaler(device_type: str, enabled: bool) -> Any:
+    """Instantiate a GradScaler compatible across torch versions."""
+
+    try:
+        return _GradScaler(device_type=device_type, enabled=enabled)  # type: ignore[arg-type]
+    except TypeError:  # pragma: no cover - fallback path
+        return _GradScaler(enabled=enabled)
+
+
+def _autocast_context(device_type: str, enabled: bool) -> ContextManager[Any]:
+    """Return an autocast context manager across torch versions."""
+
+    try:
+        return _autocast(device_type=device_type, enabled=enabled)  # type: ignore[arg-type]
+    except TypeError:  # pragma: no cover - fallback path
+        return _autocast(enabled=enabled)
 
 
 def _set_seed(seed: int) -> None:
@@ -38,7 +66,7 @@ def build_dataloaders(
     DataLoader,
     DataLoader,
     DataLoader,
-    Dict[str, Dict[int, torch.LongTensor]],
+    Dict[str, Dict[int, torch.Tensor]],
 ]:
     dataset_cfg = cfg.dataset
     max_len = int(dataset_cfg.max_len)
@@ -79,7 +107,7 @@ def build_dataloaders(
         collate_fn=partial(collate_left_pad, max_len=max_len),
     )
 
-    seen_items: Dict[str, Dict[int, torch.LongTensor]] = {
+    seen_items: Dict[str, Dict[int, torch.Tensor]] = {
         "val": {user: val_dataset.history_tensor(user) for user in range(val_dataset.num_users)},
         "test": {
             user: test_dataset.history_tensor(user) for user in range(test_dataset.num_users)
@@ -131,7 +159,7 @@ def build_model(cfg: DictConfig, num_items: int, max_len: int) -> Dlinoss4Rec:
 def evaluate_fullsort(
     model: Dlinoss4Rec,
     loader: DataLoader,
-    seen_items: Dict[int, torch.LongTensor],
+    seen_items: Dict[int, torch.Tensor],
     device: torch.device,
     *,
     topk: int,
@@ -185,10 +213,7 @@ def main(cfg: DictConfig) -> None:
     )
     grad_clip = cfg.training.get("grad_clip")
     grad_clip_value = float(grad_clip) if grad_clip is not None else None
-    if amp_enabled:
-        scaler = amp.GradScaler(device_type=device.type, enabled=True)
-    else:
-        scaler = amp.GradScaler(enabled=False)
+    scaler = _make_grad_scaler(device.type, amp_enabled)
 
     run_dir = Path(to_absolute_path(str(cfg.training.save_dir)))
     dataset_name = str(cfg.dataset.name)
@@ -241,7 +266,7 @@ def main(cfg: DictConfig) -> None:
         for batch in train_loader:
             optimizer.zero_grad(set_to_none=True)
             batch = batch.to(device)
-            with amp.autocast(device_type=device.type, enabled=amp_enabled):
+            with _autocast_context(device.type, amp_enabled):
                 loss = model.forward_loss(batch)
             scaler.scale(loss).backward()
             if grad_clip_value is not None:
