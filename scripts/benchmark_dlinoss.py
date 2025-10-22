@@ -28,6 +28,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - import guard
 
 from ossm.models.dlinoss import DampedLinOSSLayer
 
+jax.config.update("jax_enable_x64", True)
+
 
 @contextmanager
 def _disable_kernel(flag: bool):
@@ -49,6 +51,18 @@ def _disable_kernel(flag: bool):
 
 def _to_numpy(tensor: torch.Tensor) -> jnp.ndarray:
     return jnp.array(tensor.detach().cpu().numpy())
+
+
+def _promote_param(value: jnp.ndarray) -> jnp.ndarray:
+    if jnp.issubdtype(value.dtype, jnp.floating):
+        return value.astype(jnp.float64)
+    if jnp.issubdtype(value.dtype, jnp.complexfloating):
+        return value.astype(jnp.complex128)
+    return value
+
+
+def _params_to_64bits(params: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
+    return {name: _promote_param(value) for name, value in params.items()}
 
 
 def _build_layers(ssm_size: int, hidden_dim: int):
@@ -155,9 +169,7 @@ def main() -> None:
     with torch.no_grad():
         torch_double_out = layer_double(torch_input_double)
 
-    prev_x64 = jax.config.read("jax_enable_x64") if hasattr(jax.config, "read") else None
-    jax.config.update("jax_enable_x64", True)
-    params64 = {name: jnp.asarray(value, dtype=jnp.float64) for name, value in params.items()}
+    params64 = _params_to_64bits(params)
     jax_layer64 = JaxDampedIMEX1Layer(
         state_dim=ssm_size,
         hidden_dim=hidden_dim,
@@ -175,12 +187,14 @@ def main() -> None:
     )
     for name, value in params64.items():
         object.__setattr__(jax_layer64, name, value)
-    jax_double_in = jnp.asarray(torch_input_double.squeeze(0).detach().cpu().numpy())
+    jax_double_in = jnp.asarray(
+        torch_input_double.squeeze(0).detach().cpu().numpy(), dtype=jnp.float64
+    )
     jax_double_out = jax_layer64(jax_double_in)
-    torch_double_jnp = jnp.asarray(torch_double_out.squeeze(0).detach().cpu().numpy())
+    torch_double_jnp = jnp.asarray(
+        torch_double_out.squeeze(0).detach().cpu().numpy(), dtype=jnp.float64
+    )
     max_diff_double = jnp.max(jnp.abs(torch_double_jnp - jax_double_out)).item()
-    if prev_x64 is not None:
-        jax.config.update("jax_enable_x64", prev_x64)
 
     print("Damped LinOSS IMEX1 Benchmark")
     print(f"Sequence length: {seq_len}, state dim: {ssm_size}, hidden dim: {hidden_dim}")

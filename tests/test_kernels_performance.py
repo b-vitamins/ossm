@@ -1,20 +1,29 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple, cast
+from unittest import mock
 
 import pytest
 import torch
 from torch import Tensor
 from torch.utils import benchmark
 
+from ossm.models._dlinoss_scan import has_kernels as _dlinoss_has_kernels
+from ossm.models._dlinoss_scan import run_dlinoss_imex1
 from ossm.models._linoss_scan import try_run_scan as _linoss_try_run_scan
 from ossm.models._lru_scan import try_run_lru_scan
 from ossm.models._rnn_scan import try_run_linear_rnn_scan
 from ossm.models._s5_scan import try_run_s5_scan
+from ossm.models.dlinoss import DampedLinOSSLayer
 
 
 _CPU_SPEEDUPS = {
+    # Recent October 2025 CPU runs of the IMEX1 kernel report ~9.9x gains; pin the
+    # guardrail slightly lower so routine variance still passes while large
+    # regressions fail loudly.
+    "dlinoss": 8.5,
     "linoss": 12.0,
     # The complex-valued scans have slightly lower gains on CI hardware; these
     # thresholds reflect measured speedups with PyTorch 2.8 CPU wheels.
@@ -30,6 +39,7 @@ _CPU_SPEEDUPS = {
 }
 
 _CUDA_SPEEDUPS = {
+    "dlinoss": 3.5,
     "linoss": 4.0,
     "lru": 3.0,
     "s5": 3.0,
@@ -214,7 +224,54 @@ def _setup_rnn_case(
     return _inner
 
 
+def _setup_dlinoss_case(
+    length: int,
+    batch: int,
+    ssm: int,
+    hidden_dim: int,
+) -> Callable[[torch.device], Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]]:
+    def _inner(device: torch.device) -> Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]:
+        torch.manual_seed(0)
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(0)
+
+        if not _dlinoss_has_kernels():
+            return None, None, "D-LinOSS kernel is unavailable"
+
+        layer = DampedLinOSSLayer(ssm_size=ssm, hidden_dim=hidden_dim).to(device)
+        layer.eval()
+        with torch.no_grad():
+            a_diag, g_diag, step = layer._project_parameters(device=device, dtype=torch.float32)
+
+        bu_real = torch.randn(length, batch, ssm, dtype=torch.float32, device=device)
+        bu_imag = torch.randn(length, batch, ssm, dtype=torch.float32, device=device)
+        bu = torch.complex(bu_real, bu_imag)
+
+        try:
+            _ = run_dlinoss_imex1(a_diag, g_diag, step, bu)
+        except RuntimeError:
+            return None, None, "D-LinOSS kernel execution failed"
+
+        def run_extension() -> Tensor:
+            return cast(Tensor, run_dlinoss_imex1(a_diag, g_diag, step, bu))
+
+        def run_reference() -> Tensor:
+            with mock.patch.dict(os.environ, {"OSSM_DLINOSS_DISABLE_KERNEL": "1"}):
+                return run_dlinoss_imex1(a_diag, g_diag, step, bu)
+
+        return run_extension, run_reference, None
+
+    return _inner
+
+
 _CPU_CASES = [
+    BenchmarkCase(
+        name="dlinoss",
+        device_type="cpu",
+        setup=_setup_dlinoss_case(length=2048, batch=8, ssm=128, hidden_dim=256),
+        min_runtime=0.35,
+        threshold=_CPU_SPEEDUPS["dlinoss"],
+    ),
     BenchmarkCase(
         name="linoss",
         device_type="cpu",
@@ -259,6 +316,14 @@ _CPU_CASES = [
 
 
 _CUDA_CASES = [
+    BenchmarkCase(
+        name="dlinoss",
+        device_type="cuda",
+        setup=_setup_dlinoss_case(length=2048, batch=16, ssm=128, hidden_dim=256),
+        min_runtime=0.6,
+        threshold=_CUDA_SPEEDUPS["dlinoss"],
+        synchronize=True,
+    ),
     BenchmarkCase(
         name="linoss",
         device_type="cuda",
