@@ -432,6 +432,36 @@ def _format_eval(split: str, loss: float, accuracy: Optional[float]) -> str:
     return " • ".join(parts)
 
 
+def _missing_override_value(token: str) -> ValueError:
+    message = (
+        f"Hydra override '{token}' is missing a value. Use 'key=value' syntax or "
+        "a recognised CLI flag (e.g. '--optimizer adamw')."
+    )
+    return ValueError(message)
+
+
+def _normalize_hydra_overrides(overrides: Sequence[str]) -> List[str]:
+    """Coerce space-separated Hydra overrides into ``key=value`` pairs."""
+
+    normalised: List[str] = []
+    i = 0
+    while i < len(overrides):
+        token = overrides[i]
+
+        if "=" in token or token.startswith(("+", "-", "?", "~")):
+            normalised.append(token)
+        else:
+            if i + 1 >= len(overrides):
+                raise _missing_override_value(token)
+            next_token = overrides[i + 1]
+            if "=" in next_token or next_token.startswith("-"):
+                raise _missing_override_value(token)
+            normalised.append(f"{token}={next_token}")
+            i += 1
+        i += 1
+    return normalised
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace, List[str]]:
     parser = argparse.ArgumentParser(
         description="Train OSSM models",
@@ -917,7 +947,7 @@ def _compose_config(args: argparse.Namespace, extra_overrides: Sequence[str]) ->
         ]
     )
 
-    overrides.extend(extra_overrides)
+    overrides.extend(_normalize_hydra_overrides(extra_overrides))
 
     with initialize(config_path="configs", version_base="1.3"):
         cfg = compose(config_name="config", overrides=overrides)
