@@ -18,33 +18,34 @@ def _reference_dlinoss_states(
 ) -> Tensor:
     """Pure PyTorch recurrence returning the full latent state trajectory."""
 
-    device = bu.device
-    dtype = bu.dtype
+    # Ensure the math runs with supported CUDA kernels
+    with torch.amp.autocast("cuda", enabled=False):
+        # Keep real-valued scalars in fp32 and complex inputs in complex64
+        a_diag_f = a_diag.float()
+        g_diag_f = g_diag.float()
+        step_f = step.float()
+        bu_c = bu.to(torch.complex64)
 
-    a_diag_c = a_diag.to(device=device, dtype=dtype)
-    g_diag_c = g_diag.to(device=device, dtype=dtype)
-    step_c = step.to(device=device, dtype=dtype)
+        denom = 1.0 + step_f * g_diag_f
+        m11 = 1.0 / denom
+        m12 = -(step_f * a_diag_f) / denom
+        m21 = step_f / denom
+        m22 = 1.0 - (step_f * step_f * a_diag_f) / denom
 
-    denom = 1.0 + step_c * g_diag_c
-    m11 = 1.0 / denom
-    m12 = -(step_c * a_diag_c) / denom
-    m21 = step_c / denom
-    m22 = 1.0 - (step_c * step_c * a_diag_c) / denom
+        step_broadcast = step_f.view(1, 1, -1)
+        denom_broadcast = denom.view(1, 1, -1)
+        f1 = bu_c * (step_broadcast / denom_broadcast)
+        f2 = bu_c * (step_broadcast * step_broadcast / denom_broadcast)
 
-    step_broadcast = step_c.view(1, 1, -1)
-    denom_broadcast = denom.view(1, 1, -1)
-    f1 = bu * (step_broadcast / denom_broadcast)
-    f2 = bu * (step_broadcast * step_broadcast / denom_broadcast)
-
-    a_matrix = torch.stack(
-        (
-            torch.stack((m11, m12), dim=-1),
-            torch.stack((m21, m22), dim=-1),
-        ),
-        dim=-2,
-    )
-    b_elems = torch.stack((f1, f2), dim=-1)
-    return _run_associative_scan(a_matrix, b_elems)
+        a_matrix = torch.stack(
+            (
+                torch.stack((m11, m12), dim=-1),
+                torch.stack((m21, m22), dim=-1),
+            ),
+            dim=-2,
+        )
+        b_elems = torch.stack((f1, f2), dim=-1)
+        return _run_associative_scan(a_matrix, b_elems)
 
 class _DlinossKernels(Protocol):
     def dlinoss_imex1_forward(

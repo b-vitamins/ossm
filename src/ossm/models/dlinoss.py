@@ -207,9 +207,18 @@ class DampedLinOSSLayer(nn.Module):
         b_imag_t = b_imag.transpose(0, 1)
         bu_real = flat_inputs @ b_real_t
         bu_imag = flat_inputs @ b_imag_t
-        bu = torch.complex(bu_real, bu_imag).reshape(batch, length, self.ssm_size)
+        # Force complex64 to avoid ComplexHalf kernels
+        bu = (
+            torch.complex(bu_real.float(), bu_imag.float())
+            .to(torch.complex64)
+            .reshape(batch, length, self.ssm_size)
+        )
 
-        outputs_complex = self._apply_damped_imex1(a_diag, g_diag, step, bu)
+        # Run the scan in fp32/complex64 regardless of surrounding dtype
+        with torch.amp.autocast("cuda", enabled=False):
+            outputs_complex = self._apply_damped_imex1(
+                a_diag.float(), g_diag.float(), step.float(), bu.to(torch.complex64)
+            )
 
         states = outputs_complex.reshape(batch * length, self.ssm_size)
         states_real = states.real
