@@ -216,6 +216,76 @@ Hydra resolves the requested defaults, applies CLI/override modifications, and
 stores the full configuration under `${OSSM_WORK_DIR:-./outputs}` alongside
 training logs.
 
+### Sequential recommendation with D-LinOSSRec
+
+The same `train.py` entrypoint also orchestrates the D-LinOSS4Rec experiments.
+The workflow mirrors the MovieLens/Amazon evaluation protocol from the paper
+and can be reproduced on CPU (for smoke tests) or GPU (for full-scale runs).
+
+1. **Download & preprocess datasets**
+
+   ```bash
+   # MovieLens-1M
+   wget https://files.grouplens.org/datasets/movielens/ml-1m.zip
+   unzip ml-1m.zip -d data/raw/ml-1m
+   python scripts/prepare_ml1m.py \
+     --raw data/raw/ml-1m/ml-1m \
+     --out data/seqrec/ml1m \
+     --min-interactions 5
+
+   # Amazon category dumps (Beauty & Video Games)
+   mkdir -p data/raw/amazon
+   wget http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Beauty_5.json.gz \
+     -O data/raw/amazon/reviews_Beauty_5.json.gz
+   wget http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Video_Games_5.json.gz \
+     -O data/raw/amazon/reviews_Video_Games_5.json.gz
+   python scripts/prepare_amazon.py \
+     --subset beauty \
+     --raw data/raw/amazon \
+     --out data/seqrec/amazonbeauty \
+     --min-interactions 5
+   python scripts/prepare_amazon.py \
+     --subset videogames \
+     --raw data/raw/amazon \
+     --out data/seqrec/amazonvideogames \
+     --min-interactions 5
+   ```
+
+   Increase `--min-interactions` when you need a smaller CPU-only benchmark; the
+   script always performs leave-one-out splits and writes the parquet/NumPy
+   artefacts expected by the trainer.
+
+2. **Train D-LinOSSRec while monitoring telemetry**
+
+   ```bash
+   # Example: CPU-friendly sanity check on Amazon Beauty
+   python train.py \
+     training=seqrec \
+     dataset=amazonbeauty validation_dataset=amazonbeauty test_dataset=amazonbeauty \
+     model=dlinossrec head=tiedsoftmax \
+     training.device=cpu training.amp=false training.epochs=2 training.batch_size=64 \
+     dataset.num_workers=0 validation_dataset.num_workers=0 test_dataset.num_workers=0 \
+     model.d_model=32 model.ssm_size=64 \
+     | tee reports/amazonbeauty_seqrec.log
+   ```
+
+   The progress reporter prints step-level loss, throughput, validation ranking
+   metrics (HR@10/NDCG@10/MRR@10), and a final summary that mirrors the
+   classification telemetry style.
+
+3. **Aggregate metrics into publication-style tables**
+
+   Every training run appends a row to `${OSSM_WORK_DIR}/seqrec/.../summary.jsonl`.
+   You can consolidate arbitrary runs into the report tables with:
+
+   ```bash
+   python scripts/make_tables.py outputs/seqrec/**/summary.jsonl
+   ```
+
+   The utility prints Table 1 (overall recommendation quality), Table 3
+   (efficiency on ML-1M), and Table 4 (ablation study) in the same format used by
+   the paper.
+
 ---
 
 ## Development workflow

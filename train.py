@@ -35,6 +35,8 @@ from ossm.models import (
     S5Backbone,
     SequenceBackboneOutput,
 )
+from ossm.training import seqrec_main
+from ossm.training.progress import ProgressReporter, format_duration
 LOGGER = logging.getLogger(__name__)
 COLLATE_FNS = {
     "pad": pad_collate,
@@ -64,65 +66,6 @@ def _classification_loss(logits: Tensor, labels: Tensor) -> Tensor:
     one_hot = F.one_hot(labels, num_classes=num_classes).to(logits.dtype)
     probs = torch.softmax(logits, dim=-1)
     return -(one_hot * torch.log(probs + 1e-8)).sum(dim=-1).mean()
-
-
-def _format_duration(seconds: float) -> str:
-    total = int(max(seconds, 0.0))
-    hours, rem = divmod(total, 3600)
-    minutes, secs = divmod(rem, 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-
-
-class _ProgressReporter:
-    def __init__(self, total_steps: int) -> None:
-        self.total_steps = total_steps
-        self.start_time = time.perf_counter()
-        self.last_log_time = self.start_time
-        self.interval_examples = 0
-        self.interval_steps = 0
-
-    def update(self, batch_size: int) -> None:
-        self.interval_examples += int(batch_size)
-        self.interval_steps += 1
-
-    def log(
-        self,
-        step: int,
-        loss: float,
-        *,
-        metrics: Optional[Dict[str, float]] = None,
-        lr: Optional[float] = None,
-    ) -> None:
-        now = time.perf_counter()
-        interval = max(now - self.last_log_time, 1e-9)
-        elapsed = now - self.start_time
-        remaining = max(self.total_steps - step, 0)
-        avg_step = elapsed / max(step, 1)
-        eta = avg_step * remaining
-        throughput = (
-            self.interval_examples / interval if self.interval_examples else 0.0
-        )
-        step_time = interval / max(self.interval_steps, 1)
-
-        parts = [f"Step {step:05d}/{self.total_steps:05d}", f"Loss = {loss:.4f}"]
-        if metrics:
-            for name, value in metrics.items():
-                parts.append(f"{name} = {value:.4f}")
-        if lr is not None:
-            parts.append(f"LR = {lr:.2e}")
-        parts.append(f"Samples/s = {throughput:,.1f}")
-        parts.append(f"Step time = {step_time * 1e3:.1f} ms")
-        parts.append(f"Time = {_format_duration(elapsed)}")
-        parts.append(f"ETA = {_format_duration(eta)}")
-        print(" \u2022 ".join(parts))
-
-        self.last_log_time = now
-        self.interval_examples = 0
-        self.interval_steps = 0
-
-    def summary(self) -> None:
-        elapsed = time.perf_counter() - self.start_time
-        print(f"Training finished • Time = {_format_duration(elapsed)}")
 
 def _build_dataloader(cfg: DictConfig, dataset, *, shuffle: Optional[bool] = None) -> DataLoader:
     collate_name = cfg.get("collate", "pad")
@@ -978,7 +921,7 @@ def run_training(cfg: DictConfig, device: torch.device, runtime: _RuntimeSetting
         if not isinstance(batches_per_epoch, int):
             raise ValueError("Cannot derive steps from epochs without a sized dataloader")
         max_steps = int(epochs) * batches_per_epoch
-    progress = _ProgressReporter(max_steps)
+    progress = ProgressReporter(max_steps)
 
     device_label = device.type if device.index is None else f"{device.type}:{device.index}"
     batches_display = batches_per_epoch if batches_per_epoch is not None else "?"
@@ -1090,6 +1033,11 @@ def run_training(cfg: DictConfig, device: torch.device, runtime: _RuntimeSetting
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args, extra = parse_args(argv)
     cfg = _compose_config(args, extra)
+    if str(cfg.training.get("task", "")) == "seqrec":
+        if args.device:
+            cfg.training.device = args.device
+        seqrec_main(cfg)
+        return
     device = _select_device(args.device)
     runtime = _RuntimeSettings(
         cudnn_benchmark=bool(cfg.training.get("cudnn_benchmark", False)),

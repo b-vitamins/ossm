@@ -1,0 +1,39 @@
+gpu_id: 'cpu'
+log_wandb: False
+
+hidden_size: 32
+num_layers: 1
+dropout_prob: 0.2
+loss_type: 'CE'
+
+d_state: 16
+d_conv: 3
+expand: 2
+
+dataset: ml-100k
+MAX_ITEM_LIST_LENGTH: 50
+
+USER_ID_FIELD: user_id
+ITEM_ID_FIELD: item_id
+load_col:
+  inter: [user_id, item_id, rating, timestamp]
+
+user_inter_num_interval: "[5,inf)"
+item_inter_num_interval: "[5,inf)"
+
+epochs: 3
+train_batch_size: 256
+learner: adam
+learning_rate: 0.001
+eval_step: 1
+stopping_step: 3
+train_neg_sample_args: ~
+
+metrics: ['Hit', 'NDCG', 'MRR']
+valid_metric: NDCG@10
+eval_batch_size: 512
+weight_decay: 0.0
+topk: [5, 10]
+
+neg_sampling:
+  uniform: 1
