@@ -71,8 +71,11 @@ def _disable_kernel(flag: bool):
         _linoss_scan._kernels = old_kernels  # type: ignore[attr-defined]
 
 
-def _to_numpy(tensor: torch.Tensor) -> jnp.ndarray:
-    return jnp.asarray(tensor.detach().cpu().numpy())
+def _to_jax_array(tensor: torch.Tensor, *, dtype: jnp.dtype | None = None) -> jnp.ndarray:
+    array = jnp.asarray(tensor.detach().cpu().numpy())
+    if dtype is not None and array.dtype != dtype:
+        array = array.astype(dtype)
+    return array
 
 
 def _promote_tree_to_64bits(tree):
@@ -91,17 +94,20 @@ def _build_layers(ssm_size: int, hidden_dim: int, discretization: str):
     torch.manual_seed(42)
     layer = torch_linoss.LinOSSLayer(ssm_size=ssm_size, hidden_dim=hidden_dim, discretization=discretization).eval()
 
-    params = {
-        "A_diag": _to_numpy(layer.A_diag),
-        "steps": _to_numpy(layer.steps),
-        "B": _to_numpy(layer.B),
-        "C": _to_numpy(layer.C),
-        "D": _to_numpy(layer.D),
+    torch_params = {
+        "A_diag": layer.A_diag,
+        "steps": layer.steps,
+        "B": layer.B,
+        "C": layer.C,
+        "D": layer.D,
     }
 
     key = jr.PRNGKey(0)
     jax_layer = JaxLinOSSLayer(ssm_size, hidden_dim, discretization, key=key)
-    for name, value in params.items():
+    for name, tensor in torch_params.items():
+        target = getattr(jax_layer, name)
+        target_dtype = getattr(target, "dtype", None)
+        value = _to_jax_array(tensor, dtype=target_dtype)
         object.__setattr__(jax_layer, name, value)
 
     return layer, jax_layer
@@ -155,7 +161,7 @@ def main() -> None:
     layer, jax_layer = _build_layers(ssm_size, hidden_dim, discretization)
 
     torch_input = torch.randn(1, seq_len, hidden_dim, dtype=torch.float32)
-    jax_input = _to_numpy(torch_input.squeeze(0))
+    jax_input = _to_jax_array(torch_input.squeeze(0))
 
     torch_kernel_time, torch_kernel_out = _measure_torch(layer, torch_input, disable_kernel=False)
     torch_fallback_time, torch_fallback_out = _measure_torch(layer, torch_input, disable_kernel=True)
@@ -164,7 +170,7 @@ def main() -> None:
 
     jax_time, jax_out = _measure_jax(jax_layer, jax_input)
 
-    torch_kernel_jnp = _to_numpy(torch_kernel_out.squeeze(0))
+    torch_kernel_jnp = _to_jax_array(torch_kernel_out.squeeze(0), dtype=jax_out.dtype)
     max_diff_kernel_vs_jax = jnp.max(jnp.abs(torch_kernel_jnp - jax_out)).item()
 
     layer_double = torch_linoss.LinOSSLayer(ssm_size=ssm_size, hidden_dim=hidden_dim, discretization=discretization).double().eval()
@@ -175,13 +181,9 @@ def main() -> None:
 
     jax_layer64 = _promote_tree_to_64bits(jax_layer)
 
-    jax_double_in = jnp.asarray(
-        torch_input_double.squeeze(0).detach().cpu().numpy(), dtype=jnp.float64
-    )
+    jax_double_in = _to_jax_array(torch_input_double.squeeze(0), dtype=jnp.float64)
     jax_double_out = jax_layer64(jax_double_in)
-    torch_double_jnp = jnp.asarray(
-        torch_double_out.squeeze(0).detach().cpu().numpy(), dtype=jnp.float64
-    )
+    torch_double_jnp = _to_jax_array(torch_double_out.squeeze(0), dtype=jnp.float64)
     max_diff_double = jnp.max(jnp.abs(torch_double_jnp - jax_double_out)).item()
 
     print("LinOSS IMEX Benchmark")
