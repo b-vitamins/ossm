@@ -1,0 +1,19 @@
+name: amazonvideogames
+root: ${paths.data_root}/seqrec/amazonvideogames
+max_len: 50
+min_interactions: 5
+num_workers: 4
+pin_memory: true
+use_time_gaps: false
+dropout: 0.4
+view: seqrec
+split: train
+steps: null
+depth: null
+record_grid: false
+record_source: false
+resample:
+  train: 0.0
+  val: 0.0
+  test: 0.0
+resample_seed: ${seed}

@@ -1,8 +1,9 @@
 """Model backbones and task heads."""
 
 from .base import Backbone, Head, SequenceBackboneOutput
-from .heads import ClassificationHead, RegressionHead
+from .heads import ClassificationHead, RegressionHead, TiedSoftmaxHead
 from .dlinoss import DampedLinOSSBackbone, DampedLinOSSBlock, DampedLinOSSLayer
+from .dlinossrec import Dlinoss4Rec, ItemEmbeddingEncoder
 from .linoss import LinOSSBackbone, LinOSSBlock, LinOSSLayer
 from .lru import LRUBackbone, LRUBlock, LRULayer
 from .ncde import NCDEBackbone, NCDELayer, NCDEVectorField, NRDELayer
@@ -26,6 +27,8 @@ __all__ = [
     "DampedLinOSSBackbone",
     "DampedLinOSSBlock",
     "DampedLinOSSLayer",
+    "Dlinoss4Rec",
+    "ItemEmbeddingEncoder",
     "LinOSSBackbone",
     "LinOSSBlock",
     "LinOSSLayer",
@@ -46,4 +49,5 @@ __all__ = [
     "S5Backbone",
     "S5Block",
     "S5Layer",
+    "TiedSoftmaxHead",
 ]

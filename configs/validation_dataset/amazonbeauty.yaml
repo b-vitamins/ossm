@@ -1,0 +1,13 @@
+name: ${dataset.name}
+root: ${dataset.root}
+split: val
+max_len: ${dataset.max_len}
+view: ${dataset.view}
+steps: ${dataset.steps}
+depth: ${dataset.depth}
+record_grid: ${dataset.record_grid}
+record_source: ${dataset.record_source}
+resample: ${dataset.resample}
+resample_seed: ${dataset.resample_seed}
+num_workers: ${dataset.num_workers}
+pin_memory: ${dataset.pin_memory}

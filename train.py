@@ -4,7 +4,6 @@ import argparse
 import math
 import logging
 import sys
-import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +34,8 @@ from ossm.models import (
     S5Backbone,
     SequenceBackboneOutput,
 )
+from ossm.training import seqrec_main
+from ossm.training.progress import ProgressReporter
 LOGGER = logging.getLogger(__name__)
 COLLATE_FNS = {
     "pad": pad_collate,
@@ -42,12 +43,13 @@ COLLATE_FNS = {
     "path": path_collate,
 }
 
-AVAILABLE_MODELS = ("linoss_im", "dlinoss_imex1", "s5", "lru", "ncde", "rnn")
-AVAILABLE_HEADS = ("classification", "regression")
+AVAILABLE_MODELS = ("linoss_im", "dlinoss_imex1", "s5", "lru", "ncde", "rnn", "dlinossrec")
+AVAILABLE_HEADS = ("classification", "regression", "tiedsoftmax")
+AVAILABLE_TASKS = ("classification", "regression", "seqrec")
 # NOTE: Dataset view options are determined by the dataset implementation, not
 # the dataloader collate functions. Enumerate the supported UEA views explicitly
 # so "raw" remains selectable even though there is no matching collate fn.
-AVAILABLE_VIEWS = ("raw", "coeff", "path")
+AVAILABLE_VIEWS = ("raw", "coeff", "path", "seqrec")
 AVAILABLE_OPTIMIZERS = ("adamw",)
 AVAILABLE_SCHEDULERS = ("none",)
 
@@ -64,65 +66,6 @@ def _classification_loss(logits: Tensor, labels: Tensor) -> Tensor:
     one_hot = F.one_hot(labels, num_classes=num_classes).to(logits.dtype)
     probs = torch.softmax(logits, dim=-1)
     return -(one_hot * torch.log(probs + 1e-8)).sum(dim=-1).mean()
-
-
-def _format_duration(seconds: float) -> str:
-    total = int(max(seconds, 0.0))
-    hours, rem = divmod(total, 3600)
-    minutes, secs = divmod(rem, 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-
-
-class _ProgressReporter:
-    def __init__(self, total_steps: int) -> None:
-        self.total_steps = total_steps
-        self.start_time = time.perf_counter()
-        self.last_log_time = self.start_time
-        self.interval_examples = 0
-        self.interval_steps = 0
-
-    def update(self, batch_size: int) -> None:
-        self.interval_examples += int(batch_size)
-        self.interval_steps += 1
-
-    def log(
-        self,
-        step: int,
-        loss: float,
-        *,
-        metrics: Optional[Dict[str, float]] = None,
-        lr: Optional[float] = None,
-    ) -> None:
-        now = time.perf_counter()
-        interval = max(now - self.last_log_time, 1e-9)
-        elapsed = now - self.start_time
-        remaining = max(self.total_steps - step, 0)
-        avg_step = elapsed / max(step, 1)
-        eta = avg_step * remaining
-        throughput = (
-            self.interval_examples / interval if self.interval_examples else 0.0
-        )
-        step_time = interval / max(self.interval_steps, 1)
-
-        parts = [f"Step {step:05d}/{self.total_steps:05d}", f"Loss = {loss:.4f}"]
-        if metrics:
-            for name, value in metrics.items():
-                parts.append(f"{name} = {value:.4f}")
-        if lr is not None:
-            parts.append(f"LR = {lr:.2e}")
-        parts.append(f"Samples/s = {throughput:,.1f}")
-        parts.append(f"Step time = {step_time * 1e3:.1f} ms")
-        parts.append(f"Time = {_format_duration(elapsed)}")
-        parts.append(f"ETA = {_format_duration(eta)}")
-        print(" \u2022 ".join(parts))
-
-        self.last_log_time = now
-        self.interval_examples = 0
-        self.interval_steps = 0
-
-    def summary(self) -> None:
-        elapsed = time.perf_counter() - self.start_time
-        print(f"Training finished • Time = {_format_duration(elapsed)}")
 
 def _build_dataloader(cfg: DictConfig, dataset, *, shuffle: Optional[bool] = None) -> DataLoader:
     collate_name = cfg.get("collate", "pad")
@@ -513,7 +456,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     model_group.add_argument(
         "--task",
         default=None,
-        choices=AVAILABLE_HEADS,
+        choices=AVAILABLE_TASKS,
         help="Training objective; defaults to the selected head.",
     )
     model_group.add_argument(
@@ -543,7 +486,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     )
     data_group.add_argument(
         "--dataset-view",
-        default="coeff",
+        default=None,
         choices=AVAILABLE_VIEWS,
         help="Dataset representation to materialise.",
     )
@@ -758,42 +701,92 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         help="Override the Hydra work directory (paths.work_dir).",
     )
 
-    args, unknown = parser.parse_known_args(argv)
+    argv_list: Sequence[str]
+    if argv is None:
+        argv_list = sys.argv[1:]
+    else:
+        argv_list = list(argv)
+
+    args, unknown = parser.parse_known_args(argv_list)
+
+    device_flag = False
+    head_flag = False
+    model_flag = False
+    dataset_view_flag = False
+    task_flag = False
+    for entry in argv_list:
+        if entry == "--device" or entry.startswith("--device="):
+            device_flag = True
+        if entry == "--head" or entry.startswith("--head="):
+            head_flag = True
+        if entry == "--model" or entry.startswith("--model=") or entry.startswith("--backbone="):
+            model_flag = True
+        if entry == "--dataset-view" or entry.startswith("--dataset-view="):
+            dataset_view_flag = True
+        if entry == "--task" or entry.startswith("--task="):
+            task_flag = True
+
+    if args.task is None and args.head == "tiedsoftmax":
+        args.task = "seqrec"
+
+    if args.task == "seqrec":
+        if not model_flag:
+            args.model = "dlinossrec"
+        if not head_flag:
+            args.head = "tiedsoftmax"
+        if not dataset_view_flag:
+            args.dataset_view = "seqrec"
+
+    setattr(args, "_device_from_cli", device_flag)
+    setattr(args, "_head_from_cli", head_flag)
+    setattr(args, "_model_from_cli", model_flag)
+    setattr(args, "_dataset_view_from_cli", dataset_view_flag)
+    setattr(args, "_task_from_cli", task_flag)
     return args, unknown
 
 
 def _compose_config(args: argparse.Namespace, extra_overrides: Sequence[str]) -> DictConfig:
-    task = args.task or args.head
+    task = args.task if args.task is not None else args.head
+    if task != "seqrec" and args.model == "dlinossrec":
+        raise ValueError("Model 'dlinossrec' requires --task seqrec.")
+    if task != "seqrec" and args.head == "tiedsoftmax":
+        raise ValueError("Head 'tiedsoftmax' requires --task seqrec.")
+
     overrides: List[str] = [
         f"model={args.model}",
         f"head={args.head}",
         f"optimizer={args.optimizer}",
         f"scheduler={args.scheduler}",
         f"training={task}",
-        f"dataset.name={args.dataset_name}",
-        f"dataset.view={args.dataset_view}",
         f"dataset.split={args.train_split}",
     ]
+    if task == "seqrec":
+        overrides.append(f"dataset={args.dataset_name}")
+    overrides.append(f"dataset.name={args.dataset_name}")
+    if args.dataset_view is not None:
+        overrides.append(f"dataset.view={args.dataset_view}")
 
     val_name = args.val_name or args.dataset_name
-    val_view = args.val_view or args.dataset_view
-    overrides.extend(
-        [
-            f"validation_dataset.name={val_name}",
-            f"validation_dataset.view={val_view}",
-            f"validation_dataset.split={args.val_split}",
-        ]
-    )
+    if task == "seqrec":
+        overrides.append(f"validation_dataset={val_name}")
+    overrides.append(f"validation_dataset.name={val_name}")
+    if args.val_view is not None:
+        overrides.append(f"validation_dataset.view={args.val_view}")
+    elif args.dataset_view is not None:
+        overrides.append(f"validation_dataset.view={args.dataset_view}")
+    overrides.append(f"validation_dataset.split={args.val_split}")
 
     test_name = args.test_name or val_name
-    test_view = args.test_view or val_view
-    overrides.extend(
-        [
-            f"test_dataset.name={test_name}",
-            f"test_dataset.view={test_view}",
-            f"test_dataset.split={args.test_split}",
-        ]
-    )
+    if task == "seqrec":
+        overrides.append(f"test_dataset={test_name}")
+    overrides.append(f"test_dataset.name={test_name}")
+    if args.test_view is not None:
+        overrides.append(f"test_dataset.view={args.test_view}")
+    elif args.val_view is not None:
+        overrides.append(f"test_dataset.view={args.val_view}")
+    elif args.dataset_view is not None:
+        overrides.append(f"test_dataset.view={args.dataset_view}")
+    overrides.append(f"test_dataset.split={args.test_split}")
 
     if args.dataset_root:
         overrides.append(f"paths.data_root={args.dataset_root}")
@@ -804,14 +797,32 @@ def _compose_config(args: argparse.Namespace, extra_overrides: Sequence[str]) ->
         overrides.append(f"dataloader.collate={args.collate}")
     if args.batch_size is not None:
         overrides.append(f"dataloader.batch_size={args.batch_size}")
+        if task == "seqrec":
+            overrides.append(f"training.batch_size={args.batch_size}")
     if args.num_workers is not None:
         overrides.append(f"dataloader.num_workers={args.num_workers}")
+        if task == "seqrec":
+            overrides.extend(
+                [
+                    f"dataset.num_workers={args.num_workers}",
+                    f"validation_dataset.num_workers={args.num_workers}",
+                    f"test_dataset.num_workers={args.num_workers}",
+                ]
+            )
     if args.prefetch_factor is not None:
         overrides.append(f"dataloader.prefetch_factor={args.prefetch_factor}")
     if args.persistent_workers:
         overrides.append("dataloader.persistent_workers=true")
     if args.pin_memory:
         overrides.append("dataloader.pin_memory=true")
+        if task == "seqrec":
+            overrides.extend(
+                [
+                    "dataset.pin_memory=true",
+                    "validation_dataset.pin_memory=true",
+                    "test_dataset.pin_memory=true",
+                ]
+            )
     if args.pin_memory_device:
         overrides.append(f"dataloader.pin_memory_device={args.pin_memory_device}")
     if args.drop_last:
@@ -978,7 +989,7 @@ def run_training(cfg: DictConfig, device: torch.device, runtime: _RuntimeSetting
         if not isinstance(batches_per_epoch, int):
             raise ValueError("Cannot derive steps from epochs without a sized dataloader")
         max_steps = int(epochs) * batches_per_epoch
-    progress = _ProgressReporter(max_steps)
+    progress = ProgressReporter(max_steps)
 
     device_label = device.type if device.index is None else f"{device.type}:{device.index}"
     batches_display = batches_per_epoch if batches_per_epoch is not None else "?"
@@ -1090,6 +1101,12 @@ def run_training(cfg: DictConfig, device: torch.device, runtime: _RuntimeSetting
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args, extra = parse_args(argv)
     cfg = _compose_config(args, extra)
+    device_from_cli = getattr(args, "_device_from_cli", False)
+    if str(cfg.training.get("task", "")) == "seqrec":
+        if device_from_cli:
+            cfg.training.device = args.device
+        seqrec_main(cfg)
+        return
     device = _select_device(args.device)
     runtime = _RuntimeSettings(
         cudnn_benchmark=bool(cfg.training.get("cudnn_benchmark", False)),
