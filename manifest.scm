@@ -1,6 +1,6 @@
 (specifications->manifest
  '("python"
-   "python-pytorch"
+   "python-pytorch-cuda"
    "python-numpy@1"
    "python-scikit-learn"
    "python-pandas"
@@ -16,4 +16,7 @@
    "ninja"
    "cmake"
    "pybind11"
+   "python-pyarrow"
+   "python-fastparquet"
+   "unzip"
    ))
