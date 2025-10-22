@@ -125,10 +125,49 @@ jobs:
           name: ossm-kernels-${{ matrix.flavor }}
           path: dist/*.whl
 
-  benchmark-dlinoss:
-    name: Benchmark D-LinOSS kernels
+  benchmark-models:
+    name: Benchmark ${{ matrix.name }} kernels
     needs: lint-and-test
     runs-on: ubuntu-latest
+    env:
+      JAX_PLATFORMS: cpu
+      JAX_PLUGINS_DISABLED: cuda
+      CUDA_VISIBLE_DEVICES: "-1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: D-LinOSS
+            script: scripts/benchmark_dlinoss.py
+            reference_setup: "true"
+          - name: LinOSS
+            script: scripts/benchmark_linoss.py
+            reference_setup: |
+              rm -rf /tmp/linoss
+              git clone https://github.com/tk-rusch/linoss.git /tmp/linoss
+              git -C /tmp/linoss checkout 83e6318469cf9e5f78290ed5f5fe8db7cfb6e667
+              echo "LINOSS_REPO=/tmp/linoss" >> "$GITHUB_ENV"
+          - name: LRU
+            script: scripts/benchmark_lru.py
+            reference_setup: |
+              rm -rf /tmp/linoss
+              git clone https://github.com/tk-rusch/linoss.git /tmp/linoss
+              git -C /tmp/linoss checkout 83e6318469cf9e5f78290ed5f5fe8db7cfb6e667
+              echo "LINOSS_REPO=/tmp/linoss" >> "$GITHUB_ENV"
+          - name: S5
+            script: scripts/benchmark_s5.py
+            reference_setup: |
+              rm -rf /tmp/linoss
+              git clone https://github.com/tk-rusch/linoss.git /tmp/linoss
+              git -C /tmp/linoss checkout 83e6318469cf9e5f78290ed5f5fe8db7cfb6e667
+              echo "LINOSS_REPO=/tmp/linoss" >> "$GITHUB_ENV"
+          - name: Linear RNN
+            script: scripts/benchmark_rnn.py
+            reference_setup: |
+              rm -rf /tmp/linoss
+              git clone https://github.com/tk-rusch/linoss.git /tmp/linoss
+              git -C /tmp/linoss checkout 83e6318469cf9e5f78290ed5f5fe8db7cfb6e667
+              echo "LINOSS_REPO=/tmp/linoss" >> "$GITHUB_ENV"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -143,8 +182,10 @@ jobs:
           python -m pip install --upgrade pip wheel
           python -m pip install poetry-core
           python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install --no-build-isolation -e .[linoss]
-          python -m pip install --no-deps git+https://github.com/jaredbmit/damped-linoss@617acacd7cbcd85a5969daae1cb4a9b36b028d06
+          python -m pip install --no-build-isolation -e .[linoss,linoss-ref]
 
-      - name: Run D-LinOSS benchmark
-        run: PYTHONPATH=src python scripts/benchmark_dlinoss.py
+      - name: Prepare reference implementation
+        run: ${{ matrix.reference_setup }}
+
+      - name: Run benchmark
+        run: PYTHONPATH=src python ${{ matrix.script }}
