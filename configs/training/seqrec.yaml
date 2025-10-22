@@ -17,3 +17,9 @@ eval_interval: null
 max_steps: null
 trace_path: null
 trace_steps: 0
+
+# Telemetry/console controls (minimal by default)
+limit_val_batches: null       # optionally cap val batches per eval interval
+log_predictions: false        # print top-k predictions for first eval batch
+eval_verbose: false           # print eval coverage (batches/examples/candidates)
+log_gpu: false                # include GPU memory in training logs
