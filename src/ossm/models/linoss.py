@@ -125,10 +125,17 @@ class _LinossScanFn(Function):
             grad0 = grad_state[..., 0]
             grad1 = grad_state[..., 1]
 
-            grad_m11 = grad_m11 + (grad0 * prev0).sum(dim=0)
-            grad_m12 = grad_m12 + (grad0 * prev1).sum(dim=0)
-            grad_m21 = grad_m21 + (grad1 * prev0).sum(dim=0)
-            grad_m22 = grad_m22 + (grad1 * prev1).sum(dim=0)
+            if torch.is_complex(m11):
+                grad_m11 = grad_m11 + (grad0 * prev0).sum(dim=0)
+                grad_m12 = grad_m12 + (grad0 * prev1).sum(dim=0)
+                grad_m21 = grad_m21 + (grad1 * prev0).sum(dim=0)
+                grad_m22 = grad_m22 + (grad1 * prev1).sum(dim=0)
+            else:
+                # Keep gradients real when inputs are real to avoid complex-to-real mismatch
+                grad_m11 = grad_m11 + (grad0 * prev0).real.sum(dim=0)
+                grad_m12 = grad_m12 + (grad0 * prev1).real.sum(dim=0)
+                grad_m21 = grad_m21 + (grad1 * prev0).real.sum(dim=0)
+                grad_m22 = grad_m22 + (grad1 * prev1).real.sum(dim=0)
 
             grad_prev0 = grad0 * m11_conj + grad1 * m21_conj
             grad_prev1 = grad0 * m12_conj + grad1 * m22_conj
