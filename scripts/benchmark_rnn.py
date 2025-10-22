@@ -72,6 +72,20 @@ def _to_numpy(tensor: torch.Tensor) -> jnp.ndarray:
     return jnp.asarray(tensor.detach().cpu().numpy())
 
 
+def _promote_tree_to_64bits(tree):
+    def _convert(node):
+        if hasattr(node, "dtype"):
+            if jnp.issubdtype(node.dtype, jnp.floating):
+                return node.astype(jnp.float64)
+            if jnp.issubdtype(node.dtype, jnp.complexfloating):
+                return node.astype(jnp.complex128)
+        return node
+
+    return jax.tree_util.tree_map(
+        _convert, tree, is_leaf=lambda leaf: isinstance(leaf, (str, bytes))
+    )
+
+
 def _build_layers(input_dim: int, hidden_dim: int):
     torch.manual_seed(42)
     cell = torch_rnn.LinearRNNCell(input_dim, hidden_dim)
@@ -164,13 +178,14 @@ def main() -> None:
     with torch.no_grad():
         torch_double_out, _ = layer_double(torch_input_double)
 
-    params64 = {name: jnp.asarray(value, dtype=jnp.float64) for name, value in params.items()}
-    jax_cell64 = JaxLinearCell(input_dim, hidden_dim, key=jr.PRNGKey(1))
-    object.__setattr__(jax_cell64.cell, "weight", params64["weight"])
-    object.__setattr__(jax_cell64.cell, "bias", params64["bias"])
-    jax_double_in = jnp.asarray(torch_input_double.squeeze(0).detach().cpu().numpy())
+    jax_cell64 = _promote_tree_to_64bits(jax_cell)
+    jax_double_in = jnp.asarray(
+        torch_input_double.squeeze(0).detach().cpu().numpy(), dtype=jnp.float64
+    )
     jax_double_out = _jax_linear_forward(jax_cell64, jax_double_in)
-    torch_double_jnp = jnp.asarray(torch_double_out.squeeze(0).detach().cpu().numpy())
+    torch_double_jnp = jnp.asarray(
+        torch_double_out.squeeze(0).detach().cpu().numpy(), dtype=jnp.float64
+    )
     max_diff_double = jnp.max(jnp.abs(torch_double_jnp - jax_double_out)).item()
 
     print("Linear RNN Benchmark")

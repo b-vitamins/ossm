@@ -72,6 +72,20 @@ def _to_numpy(tensor: torch.Tensor) -> jnp.ndarray:
     return jnp.asarray(tensor.detach().cpu().numpy())
 
 
+def _promote_tree_to_64bits(tree):
+    def _convert(node):
+        if hasattr(node, "dtype"):
+            if jnp.issubdtype(node.dtype, jnp.floating):
+                return node.astype(jnp.float64)
+            if jnp.issubdtype(node.dtype, jnp.complexfloating):
+                return node.astype(jnp.complex128)
+        return node
+
+    return jax.tree_util.tree_map(
+        _convert, tree, is_leaf=lambda leaf: isinstance(leaf, (str, bytes))
+    )
+
+
 def _build_layers(ssm_size: int, hidden_dim: int, *, r_min: float, r_max: float, max_phase: float):
     torch.manual_seed(42)
     layer = torch_lru.LRULayer(ssm_size=ssm_size, hidden_dim=hidden_dim, r_min=r_min, r_max=r_max, max_phase=max_phase).eval()
@@ -163,13 +177,14 @@ def main() -> None:
     with torch.no_grad():
         torch_double_out = layer_double(torch_input_double)
 
-    params64 = {name: jnp.asarray(value, dtype=jnp.float64) for name, value in params.items()}
-    jax_layer64 = JaxLRULayer(ssm_size, hidden_dim, r_min=r_min, r_max=r_max, max_phase=max_phase, key=jr.PRNGKey(1))
-    for name, value in params64.items():
-        object.__setattr__(jax_layer64, name, value)
-    jax_double_in = jnp.asarray(torch_input_double.squeeze(0).detach().cpu().numpy())
+    jax_layer64 = _promote_tree_to_64bits(jax_layer)
+    jax_double_in = jnp.asarray(
+        torch_input_double.squeeze(0).detach().cpu().numpy(), dtype=jnp.float64
+    )
     jax_double_out = jax_layer64(jax_double_in)
-    torch_double_jnp = jnp.asarray(torch_double_out.squeeze(0).detach().cpu().numpy())
+    torch_double_jnp = jnp.asarray(
+        torch_double_out.squeeze(0).detach().cpu().numpy(), dtype=jnp.float64
+    )
     max_diff_double = jnp.max(jnp.abs(torch_double_jnp - jax_double_out)).item()
 
     print("LRU Benchmark")
