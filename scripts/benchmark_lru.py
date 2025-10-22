@@ -14,6 +14,7 @@ os.environ["JAX_PLUGINS_DISABLED"] = "cuda"
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 import jax
+jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import jax.random as jr
 import torch
@@ -161,8 +162,6 @@ def main() -> None:
     with torch.no_grad():
         torch_double_out = layer_double(torch_input_double)
 
-    prev_x64 = jax.config.read("jax_enable_x64") if hasattr(jax.config, "read") else None
-    jax.config.update("jax_enable_x64", True)
     params64 = {name: jnp.asarray(value, dtype=jnp.float64) for name, value in params.items()}
     jax_layer64 = JaxLRULayer(ssm_size, hidden_dim, r_min=r_min, r_max=r_max, max_phase=max_phase, key=jr.PRNGKey(1))
     for name, value in params64.items():
@@ -171,8 +170,6 @@ def main() -> None:
     jax_double_out = jax_layer64(jax_double_in)
     torch_double_jnp = jnp.asarray(torch_double_out.squeeze(0).detach().cpu().numpy())
     max_diff_double = jnp.max(jnp.abs(torch_double_jnp - jax_double_out)).item()
-    if prev_x64 is not None:
-        jax.config.update("jax_enable_x64", prev_x64)
 
     print("LRU Benchmark")
     print(f"Sequence length: {seq_len}, state dim: {ssm_size}, hidden dim: {hidden_dim}")
