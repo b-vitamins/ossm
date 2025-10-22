@@ -6,7 +6,7 @@ from typing import Optional
 
 from torch import Tensor
 
-__all__ = ["try_run_linear_rnn_scan"]
+__all__ = ["try_run_linear_rnn_scan", "is_available", "extension_error"]
 
 try:
     from ossm import _kernels as _kernels  # type: ignore[attr-defined]
@@ -43,3 +43,15 @@ def try_run_linear_rnn_scan(
         global _EXTENSION_ERROR
         _EXTENSION_ERROR = exc
         return None
+
+
+def is_available() -> bool:
+    """Return ``True`` when the compiled linear RNN kernels are importable."""
+
+    return _kernels is not None
+
+
+def extension_error() -> Optional[Exception]:
+    """Return the cached import/build error, if any."""
+
+    return _EXTENSION_ERROR

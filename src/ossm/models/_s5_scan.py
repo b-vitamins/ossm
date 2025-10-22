@@ -7,7 +7,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-__all__ = ["try_run_s5_scan"]
+__all__ = ["try_run_s5_scan", "is_available", "extension_error"]
 
 try:
     from ossm import _kernels as _kernels  # type: ignore[attr-defined]
@@ -37,3 +37,15 @@ def try_run_s5_scan(lambda_bar: Tensor, b_seq: Tensor) -> Optional[Tensor]:
         _EXTENSION_ERROR = exc
         return None
     return torch.view_as_complex(result.contiguous())
+
+
+def is_available() -> bool:
+    """Return ``True`` when the compiled S5 kernels are importable."""
+
+    return _kernels is not None
+
+
+def extension_error() -> Optional[Exception]:
+    """Return the cached import/build error, if any."""
+
+    return _EXTENSION_ERROR
