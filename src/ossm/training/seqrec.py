@@ -496,7 +496,11 @@ def main(cfg: DictConfig) -> None:
         total_steps = min(total_steps, max_steps_value)
     if total_steps <= 0:
         raise ValueError("SeqRec training computed zero total steps; check epochs and max_steps")
-    log_interval = int(cfg.training.get("log_interval", batches_per_epoch))
+    log_interval_cfg = cfg.training.get("log_interval")
+    if log_interval_cfg is None:
+        log_interval = batches_per_epoch
+    else:
+        log_interval = int(log_interval_cfg)
     if log_interval <= 0:
         log_interval = batches_per_epoch
 
