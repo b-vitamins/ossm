@@ -16,9 +16,12 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+import jax.tree_util as jtu
 import torch
 
 jax.config.update("jax_enable_x64", True)
+
+_JAX_ARRAY_TYPE = getattr(jax, "Array", type(jnp.asarray(0.0)))
 
 
 def _ensure_linoss_repo() -> None:
@@ -72,16 +75,16 @@ def _to_numpy(tensor: torch.Tensor) -> jnp.ndarray:
     return jnp.asarray(tensor.detach().cpu().numpy())
 
 
-def _promote_param(value: jnp.ndarray) -> jnp.ndarray:
-    if jnp.issubdtype(value.dtype, jnp.floating):
-        return value.astype(jnp.float64)
-    if jnp.issubdtype(value.dtype, jnp.complexfloating):
-        return value.astype(jnp.complex128)
-    return value
+def _promote_tree_to_64bits(tree):
+    def _promote(value):
+        if isinstance(value, _JAX_ARRAY_TYPE):
+            if jnp.issubdtype(value.dtype, jnp.floating):
+                return value.astype(jnp.float64)
+            if jnp.issubdtype(value.dtype, jnp.complexfloating):
+                return value.astype(jnp.complex128)
+        return value
 
-
-def _params_to_64bits(params: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
-    return {name: _promote_param(value) for name, value in params.items()}
+    return jtu.tree_map(_promote, tree)
 
 
 def _build_layers(input_dim: int, hidden_dim: int):
@@ -99,7 +102,7 @@ def _build_layers(input_dim: int, hidden_dim: int):
     object.__setattr__(jax_cell.cell, "weight", params["weight"])
     object.__setattr__(jax_cell.cell, "bias", params["bias"])
 
-    return layer, jax_cell, params
+    return layer, jax_cell
 
 
 def _measure_torch(layer: torch_rnn.RNNLayer, inputs: torch.Tensor, *, disable_kernel: bool) -> tuple[float, torch.Tensor]:
@@ -155,7 +158,7 @@ def main() -> None:
     hidden_dim = 128
     seq_len = 256
 
-    layer, jax_cell, params = _build_layers(input_dim, hidden_dim)
+    layer, jax_cell = _build_layers(input_dim, hidden_dim)
 
     torch_input = torch.randn(1, seq_len, input_dim, dtype=torch.float32)
     jax_input = _to_numpy(torch_input.squeeze(0))
@@ -176,10 +179,7 @@ def main() -> None:
     with torch.no_grad():
         torch_double_out, _ = layer_double(torch_input_double)
 
-    params64 = _params_to_64bits(params)
-    jax_cell64 = JaxLinearCell(input_dim, hidden_dim, key=jr.PRNGKey(1))
-    object.__setattr__(jax_cell64.cell, "weight", params64["weight"])
-    object.__setattr__(jax_cell64.cell, "bias", params64["bias"])
+    jax_cell64 = _promote_tree_to_64bits(jax_cell)
 
     jax_double_in = jnp.asarray(
         torch_input_double.squeeze(0).detach().cpu().numpy(), dtype=jnp.float64

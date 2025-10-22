@@ -14,6 +14,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+import jax.tree_util as jtu
 import torch
 
 from ossm.models._dlinoss_scan import extension_error, has_kernels
@@ -29,6 +30,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - import guard
 from ossm.models.dlinoss import DampedLinOSSLayer
 
 jax.config.update("jax_enable_x64", True)
+
+_JAX_ARRAY_TYPE = getattr(jax, "Array", type(jnp.asarray(0.0)))
 
 
 @contextmanager
@@ -53,16 +56,16 @@ def _to_numpy(tensor: torch.Tensor) -> jnp.ndarray:
     return jnp.array(tensor.detach().cpu().numpy())
 
 
-def _promote_param(value: jnp.ndarray) -> jnp.ndarray:
-    if jnp.issubdtype(value.dtype, jnp.floating):
-        return value.astype(jnp.float64)
-    if jnp.issubdtype(value.dtype, jnp.complexfloating):
-        return value.astype(jnp.complex128)
-    return value
+def _promote_tree_to_64bits(tree):
+    def _promote(value):
+        if isinstance(value, _JAX_ARRAY_TYPE):
+            if jnp.issubdtype(value.dtype, jnp.floating):
+                return value.astype(jnp.float64)
+            if jnp.issubdtype(value.dtype, jnp.complexfloating):
+                return value.astype(jnp.complex128)
+        return value
 
-
-def _params_to_64bits(params: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
-    return {name: _promote_param(value) for name, value in params.items()}
+    return jtu.tree_map(_promote, tree)
 
 
 def _build_layers(ssm_size: int, hidden_dim: int):
@@ -102,7 +105,7 @@ def _build_layers(ssm_size: int, hidden_dim: int):
     object.__setattr__(jax_layer, "C", params["C"])
     object.__setattr__(jax_layer, "D", params["D"])
 
-    return layer, jax_layer, params
+    return layer, jax_layer
 
 
 def _measure_torch(layer: DampedLinOSSLayer, inputs: torch.Tensor, *, disable_kernel: bool) -> tuple[float, torch.Tensor]:
@@ -147,7 +150,7 @@ def main() -> None:
     hidden_dim = 128
     seq_len = 256
 
-    layer, jax_layer, params = _build_layers(ssm_size, hidden_dim)
+    layer, jax_layer = _build_layers(ssm_size, hidden_dim)
 
     torch_input = torch.randn(1, seq_len, hidden_dim, dtype=torch.float32)
     jax_input = _to_numpy(torch_input.squeeze(0))
@@ -169,24 +172,7 @@ def main() -> None:
     with torch.no_grad():
         torch_double_out = layer_double(torch_input_double)
 
-    params64 = _params_to_64bits(params)
-    jax_layer64 = JaxDampedIMEX1Layer(
-        state_dim=ssm_size,
-        hidden_dim=hidden_dim,
-        initialization="ring",
-        r_min=0.9,
-        r_max=1.0,
-        theta_min=0.0,
-        theta_max=jnp.pi,
-        G_min=0.0,
-        G_max=1.0,
-        A_min=0.0,
-        A_max=1.0,
-        dt_std=0.5,
-        key=jr.PRNGKey(1),
-    )
-    for name, value in params64.items():
-        object.__setattr__(jax_layer64, name, value)
+    jax_layer64 = _promote_tree_to_64bits(jax_layer)
     jax_double_in = jnp.asarray(
         torch_input_double.squeeze(0).detach().cpu().numpy(), dtype=jnp.float64
     )
