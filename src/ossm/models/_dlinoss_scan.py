@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from typing import Optional, Protocol, cast
 
 import torch
@@ -64,6 +65,9 @@ else:
         pass
 
 
+_WARNED_COMPILE_FALLBACK = False
+
+
 def _trace(message: str) -> None:
     if os.environ.get("OSSM_DLINOSS_TRACE"):
         print(message, flush=True)
@@ -96,6 +100,15 @@ def _use_kernels() -> bool:
             # implementation directly, producing a graph that is agnostic to
             # the extension while the eager path continues to benefit from the
             # optimized kernels.
+            global _WARNED_COMPILE_FALLBACK
+            if not _WARNED_COMPILE_FALLBACK and has_kernels():
+                warnings.warn(
+                    "D-LinOSS kernels are temporarily disabled while torch.compile "
+                    "captures a graph; falling back to the PyTorch reference.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                _WARNED_COMPILE_FALLBACK = True
             return False
     except ImportError:
         pass
