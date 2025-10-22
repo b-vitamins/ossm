@@ -67,9 +67,9 @@ def _efficiency_table(records: List[Dict[str, object]]) -> str:
         rows.append(
             [
                 str(record.get("config")),
-                f"{float(record.get("gpu_gb", 0.0)):.2f}",
-                f"{float(record.get("train_s", 0.0)):.2f}",
-                f"{float(record.get("infer_s", 0.0)):.2f}",
+                f"{float(record.get('gpu_gb', 0.0)):.2f}",
+                f"{float(record.get('train_s', 0.0)):.2f}",
+                f"{float(record.get('infer_s', 0.0)):.2f}",
             ]
         )
     return _format_table("Table 3: Efficiency on ML-1M", ["Config", "GPU GB", "Train s", "Infer s"], rows)

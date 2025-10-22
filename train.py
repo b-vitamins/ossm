@@ -4,7 +4,6 @@ import argparse
 import math
 import logging
 import sys
-import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,7 +35,7 @@ from ossm.models import (
     SequenceBackboneOutput,
 )
 from ossm.training import seqrec_main
-from ossm.training.progress import ProgressReporter, format_duration
+from ossm.training.progress import ProgressReporter
 LOGGER = logging.getLogger(__name__)
 COLLATE_FNS = {
     "pad": pad_collate,
