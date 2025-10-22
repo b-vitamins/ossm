@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import random
+import textwrap
 import time
 from functools import partial
 from pathlib import Path
-from typing import Any, ContextManager, Dict, Tuple
+from typing import Any, ContextManager, Dict, List, Set, Tuple
 
 import numpy as np
 import torch
@@ -67,6 +68,7 @@ def build_dataloaders(
     DataLoader,
     DataLoader,
     Dict[str, Dict[int, torch.Tensor]],
+    Dict[str, Any],
 ]:
     dataset_cfg = cfg.dataset
     max_len = int(dataset_cfg.max_len)
@@ -115,7 +117,162 @@ def build_dataloaders(
             user: test_dataset.history_tensor(user) for user in range(test_dataset.num_users)
         },
     }
-    return train_loader, val_loader, test_loader, seen_items
+    loader_info = {
+        "train_shuffle": True,
+        "val_shuffle": False,
+        "test_shuffle": False,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "max_len": max_len,
+    }
+    return train_loader, val_loader, test_loader, seen_items, loader_info
+
+
+def _collect_train_targets(dataset: SeqRecTrainDataset) -> Set[int]:
+    targets: Set[int] = set()
+    for user_id in range(dataset.num_users):
+        sequence = dataset.user_sequence(user_id)
+        if len(sequence) <= 1:
+            continue
+        targets.update(int(item) for item in sequence[1:])
+    return targets
+
+
+def _collect_eval_targets(dataset: SeqRecEvalDataset) -> Tuple[Set[int], List[int]]:
+    targets: Set[int] = set()
+    context_lengths: List[int] = []
+    for index in range(len(dataset)):
+        _user_id, context, target = dataset[index]
+        targets.add(int(target))
+        context_lengths.append(len(context))
+    return targets, context_lengths
+
+
+def _summarize_seqrec_splits(
+    train_dataset: SeqRecTrainDataset,
+    val_dataset: SeqRecEvalDataset,
+    test_dataset: SeqRecEvalDataset,
+) -> Dict[str, Any]:
+    train_examples = len(train_dataset)
+    train_users = train_dataset.num_users
+    train_total_interactions = 0
+    train_min_len = float("inf")
+    train_max_len = 0
+    for user_id in range(train_users):
+        sequence_length = len(train_dataset.user_sequence(user_id))
+        train_total_interactions += sequence_length
+        train_min_len = min(train_min_len, sequence_length)
+        train_max_len = max(train_max_len, sequence_length)
+    if train_users:
+        train_avg_len = train_total_interactions / train_users
+    else:
+        train_avg_len = 0.0
+        train_min_len = 0.0
+
+    val_targets, val_context_lengths = _collect_eval_targets(val_dataset)
+    test_targets, test_context_lengths = _collect_eval_targets(test_dataset)
+
+    def _stats(lengths: List[int]) -> Tuple[int, float, int]:
+        if not lengths:
+            return 0, 0.0, 0
+        return min(lengths), sum(lengths) / len(lengths), max(lengths)
+
+    val_min_len, val_avg_len, val_max_len = _stats(val_context_lengths)
+    test_min_len, test_avg_len, test_max_len = _stats(test_context_lengths)
+
+    train_targets = _collect_train_targets(train_dataset)
+    train_val_overlap = train_targets & val_targets
+    train_test_overlap = train_targets & test_targets
+    val_test_overlap = val_targets & test_targets
+
+    summary = {
+        "train_users": train_users,
+        "train_examples": train_examples,
+        "train_interactions": train_total_interactions,
+        "train_seq_len": (int(train_min_len), float(train_avg_len), int(train_max_len)),
+        "val_examples": len(val_dataset),
+        "val_seq_len": (val_min_len, float(val_avg_len), val_max_len),
+        "test_examples": len(test_dataset),
+        "test_seq_len": (test_min_len, float(test_avg_len), test_max_len),
+        "train_root": train_dataset.root,
+        "val_root": val_dataset.root,
+        "test_root": test_dataset.root,
+        "train_val_overlap": len(train_val_overlap),
+        "train_test_overlap": len(train_test_overlap),
+        "val_test_overlap": len(val_test_overlap),
+    }
+    print(
+        "Dataset summary • "
+        f"train_users={summary['train_users']} • "
+        f"train_examples={summary['train_examples']} • "
+        f"train_interactions={summary['train_interactions']} • "
+        f"train_seq_len(min/mean/max)="
+        f"{summary['train_seq_len'][0]}/{summary['train_seq_len'][1]:.1f}/{summary['train_seq_len'][2]} • "
+        f"val_examples={summary['val_examples']} • "
+        f"val_seq_len(min/mean/max)="
+        f"{summary['val_seq_len'][0]}/{summary['val_seq_len'][1]:.1f}/{summary['val_seq_len'][2]} • "
+        f"test_examples={summary['test_examples']} • "
+        f"test_seq_len(min/mean/max)="
+        f"{summary['test_seq_len'][0]}/{summary['test_seq_len'][1]:.1f}/{summary['test_seq_len'][2]}"
+    )
+    print(
+        "Dataset roots • "
+        f"train={summary['train_root']} • "
+        f"val={summary['val_root']} • "
+        f"test={summary['test_root']}"
+    )
+    print(
+        "Split overlap • "
+        f"train∩val={summary['train_val_overlap']} • "
+        f"train∩test={summary['train_test_overlap']} • "
+        f"val∩test={summary['val_test_overlap']}"
+    )
+    if train_val_overlap:
+        preview = sorted(list(train_val_overlap))[:5]
+        print(f"  Example train∩val targets={preview}")
+    if train_test_overlap:
+        preview = sorted(list(train_test_overlap))[:5]
+        print(f"  Example train∩test targets={preview}")
+    if val_test_overlap:
+        preview = sorted(list(val_test_overlap))[:5]
+        print(f"  Example val∩test targets={preview}")
+    return summary
+
+
+def _warn_if_placeholder_dataset(summary: Dict[str, Any], dataset_name: str) -> None:
+    """Emit guidance when the fallback smoke-test dataset is detected."""
+
+    train_users = int(summary["train_users"])
+    train_examples = int(summary["train_examples"])
+    train_interactions = int(summary["train_interactions"])
+    val_examples = int(summary["val_examples"])
+    test_examples = int(summary["test_examples"])
+    suspected_placeholder = (
+        train_users <= 5
+        and train_examples <= 64
+        and train_interactions <= 256
+        and val_examples <= 8
+        and test_examples <= 8
+    )
+    if not suspected_placeholder:
+        return
+
+    dataset_root = Path(summary["train_root"]).resolve()
+    warning = textwrap.dedent(
+        f"""
+        WARNING: Detected a tiny sequential dataset for '{dataset_name}' at {dataset_root}.
+        The repository only ships this <=5-user split as a smoke test. For real experiments,
+        download the raw MovieLens/Amazon dumps and run scripts/prepare_*.py exactly as
+        documented in README.md (Sequential Recommendation section).
+        Example: python scripts/prepare_amazon.py --subset beauty --raw <raw_dir> --out <data_root>/seqrec/amazonbeauty
+        Afterwards, launch training with --dataset-root or OSSM_DATA_ROOT pointing to the processed directory.
+        """
+    ).strip()
+    print(warning)
+    print(
+        "Hint: Once you prepare the full dataset, ensure training.topk is below the candidate "
+        "pool size reported during evaluation to avoid guaranteed HR@K=1.0 runs."
+    )
 
 
 def build_model(cfg: DictConfig, num_items: int, max_len: int) -> Dlinoss4Rec:
@@ -165,15 +322,88 @@ def evaluate_fullsort(
     device: torch.device,
     *,
     topk: int,
+    split_name: str = "",
+    log_predictions: bool = False,
 ) -> Dict[str, float]:
     model.eval()
     accumulator = TopKMetricAccumulator(topk=topk)
+    batch_count = 0
+    total_examples = 0
+    total_candidates = 0
+    min_candidates = float("inf")
+    max_candidates = 0
+    first_batch_debug: Dict[str, torch.Tensor] | None = None
     for batch in loader:
         batch = batch.to(device)
         scores = model.predict_scores(batch, include_padding=False)
         mask_history_inplace(scores, batch.user_ids, seen_items, offset=1)
         targets = (batch.target - 1).to(device=device)
         accumulator.update(scores, targets)
+        finite_mask = torch.isfinite(scores)
+        candidate_counts = finite_mask.sum(dim=1)
+        total_examples += int(candidate_counts.size(0))
+        total_candidates += int(candidate_counts.sum().item())
+        if candidate_counts.numel():
+            min_candidates = min(min_candidates, int(candidate_counts.min().item()))
+            max_candidates = max(max_candidates, int(candidate_counts.max().item()))
+        batch_count += 1
+        if log_predictions and first_batch_debug is None:
+            topn = min(10, scores.size(1))
+            top_scores, top_indices = torch.topk(scores, topn, dim=1)
+            first_batch_debug = {
+                "user_ids": batch.user_ids.detach().cpu(),
+                "targets": targets.detach().cpu(),
+                "top_indices": top_indices.detach().cpu(),
+                "top_scores": top_scores.detach().cpu(),
+                "history_len": batch.mask.sum(dim=1).to(torch.long).detach().cpu(),
+                "candidate_counts": candidate_counts.detach().cpu(),
+            }
+    if batch_count == 0 or min_candidates == float("inf"):
+        min_candidates = 0
+    average_candidates = (
+        float(total_candidates) / total_examples if total_examples else 0.0
+    )
+    try:
+        expected_batches = len(loader)
+    except TypeError:  # pragma: no cover - streaming loader guard
+        expected_batches = None
+    coverage_message = "Eval coverage"
+    if split_name:
+        coverage_message += f" • split={split_name}"
+    coverage_message += f" • batches={batch_count}"
+    if expected_batches is not None:
+        coverage_message += f"/{expected_batches}"
+    coverage_message += (
+        f" • examples={total_examples}"
+        f" • candidates(min/mean/max)={min_candidates}/{average_candidates:.1f}/{max_candidates}"
+    )
+    print(coverage_message)
+    if min_candidates < topk:
+        raise RuntimeError(
+            "Evaluation candidate pool is smaller than training.topk. "
+            f"split={split_name or 'eval'} has min_candidates={min_candidates} < topk={topk}. "
+            "The bundled smoke-test data masks almost every item; prepare the full dataset "
+            "with scripts/prepare_*.py or reduce training.topk."
+        )
+    if log_predictions and first_batch_debug is not None:
+        print(
+            "Eval predictions • "
+            f"split={split_name or 'eval'} • batch=0 • topk={first_batch_debug['top_indices'].size(1)}"
+        )
+        for row in range(first_batch_debug["top_indices"].size(0)):
+            user_id = int(first_batch_debug["user_ids"][row].item())
+            target = int(first_batch_debug["targets"][row].item())
+            history_len = int(first_batch_debug["history_len"][row].item())
+            candidates = int(first_batch_debug["candidate_counts"][row].item())
+            indices = first_batch_debug["top_indices"][row].tolist()
+            scores_row = first_batch_debug["top_scores"][row].tolist()
+            formatted = ", ".join(
+                f"{int(idx + 1)}:{score:.3f}" for idx, score in zip(indices, scores_row)
+            )
+            print(
+                f"  user={user_id} • target={target} • history={history_len} "
+                f"• candidates={candidates} • top={formatted}"
+            )
     return accumulator.compute()
 
 
@@ -202,8 +432,28 @@ def main(cfg: DictConfig) -> None:
     seed = int(cfg.get("seed", 0))
     _set_seed(seed)
 
-    train_loader, val_loader, test_loader, seen_items = build_dataloaders(cfg)
+    dataset_name = str(cfg.dataset.name)
+    (
+        train_loader,
+        val_loader,
+        test_loader,
+        seen_items,
+        loader_info,
+    ) = build_dataloaders(cfg)
     train_dataset: SeqRecTrainDataset = train_loader.dataset  # type: ignore[assignment]
+    val_dataset: SeqRecEvalDataset = val_loader.dataset  # type: ignore[assignment]
+    test_dataset: SeqRecEvalDataset = test_loader.dataset  # type: ignore[assignment]
+    split_summary = _summarize_seqrec_splits(train_dataset, val_dataset, test_dataset)
+    _warn_if_placeholder_dataset(split_summary, dataset_name)
+    print(
+        "DataLoader config • "
+        f"train_shuffle={loader_info['train_shuffle']} • "
+        f"val_shuffle={loader_info['val_shuffle']} • "
+        f"test_shuffle={loader_info['test_shuffle']} • "
+        f"num_workers={loader_info['num_workers']} • "
+        f"pin_memory={loader_info['pin_memory']} • "
+        f"max_len={loader_info['max_len']}"
+    )
     num_items = train_dataset.num_items
     max_len = int(cfg.dataset.max_len)
     model = build_model(cfg, num_items=num_items, max_len=max_len).to(device)
@@ -213,12 +463,16 @@ def main(cfg: DictConfig) -> None:
         lr=float(cfg.training.lr),
         weight_decay=float(cfg.training.weight_decay),
     )
+    print(
+        "Optimizer • type=AdamW "
+        f"lr={optimizer.param_groups[0]['lr']:.6e} • "
+        f"weight_decay={optimizer.param_groups[0]['weight_decay']:.3g}"
+    )
     grad_clip = cfg.training.get("grad_clip")
     grad_clip_value = float(grad_clip) if grad_clip is not None else None
     scaler = _make_grad_scaler(device.type, amp_enabled)
 
     run_dir = Path(to_absolute_path(str(cfg.training.save_dir)))
-    dataset_name = str(cfg.dataset.name)
     run_id = cfg.training.get("run_id") or time.strftime("%Y%m%d-%H%M%S")
     output_dir = run_dir / dataset_name / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -234,9 +488,35 @@ def main(cfg: DictConfig) -> None:
     if epochs <= 0:
         raise ValueError("training.epochs must be positive for seqrec tasks")
     total_steps = epochs * batches_per_epoch
+    max_steps_cfg = cfg.training.get("max_steps")
+    if max_steps_cfg is not None:
+        max_steps_value = int(max_steps_cfg)
+        if max_steps_value <= 0:
+            raise ValueError("training.max_steps must be positive when provided for seqrec tasks")
+        total_steps = min(total_steps, max_steps_value)
+    if total_steps <= 0:
+        raise ValueError("SeqRec training computed zero total steps; check epochs and max_steps")
     log_interval = int(cfg.training.get("log_interval", batches_per_epoch))
     if log_interval <= 0:
         log_interval = batches_per_epoch
+
+    debug_flags = {
+        name: cfg.training.get(name)
+        for name in (
+            "fast_dev_run",
+            "limit_train_batches",
+            "limit_val_batches",
+            "limit_test_batches",
+            "steps",
+            "max_steps",
+        )
+        if name in cfg.training
+    }
+    debug_flags = {key: value for key, value in debug_flags.items() if value not in (None, False, 0)}
+    if debug_flags:
+        print(f"Debug flags detected • {debug_flags}")
+    else:
+        print("Debug flags detected • none")
 
     device_label = device.type if device.index is None else f"{device.type}:{device.index}"
     print(
@@ -249,6 +529,15 @@ def main(cfg: DictConfig) -> None:
         f"train_samples={len(train_dataset)}"
     )
 
+    trace_path_cfg = cfg.training.get("trace_path")
+    trace_path: Path | None = None
+    trace_limit = int(cfg.training.get("trace_steps", 0) or 0)
+    trace_records: List[Dict[str, Any]] = []
+    trace_eval_records: List[Dict[str, Any]] = []
+    if trace_path_cfg not in (None, ""):
+        trace_path = Path(to_absolute_path(str(trace_path_cfg)))
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+
     progress = ProgressReporter(total_steps)
     last_eval: Dict[str, Dict[str, float]] = {}
     best_ndcg = float("-inf")
@@ -259,6 +548,8 @@ def main(cfg: DictConfig) -> None:
     topk = int(cfg.training.topk)
 
     for epoch in range(epochs):
+        if global_step >= total_steps:
+            break
         if device.type == "cuda" and torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats(device)
         epoch_start = time.perf_counter()
@@ -266,6 +557,8 @@ def main(cfg: DictConfig) -> None:
         epoch_examples = 0
         model.train()
         for batch in train_loader:
+            if global_step >= total_steps:
+                break
             optimizer.zero_grad(set_to_none=True)
             batch = batch.to(device)
             with _autocast_context(device.type, amp_enabled):
@@ -284,6 +577,20 @@ def main(cfg: DictConfig) -> None:
 
             global_step += 1
             progress.update(batch_size)
+            if global_step <= 5:
+                current_lr = optimizer.param_groups[0]["lr"]
+                print(f"LR step • step={global_step} • lr={current_lr:.6e}")
+
+            if trace_path is not None and (trace_limit <= 0 or global_step <= trace_limit):
+                trace_records.append(
+                    {
+                        "step": global_step,
+                        "epoch": epoch + 1,
+                        "loss": loss_value,
+                        "batch_size": batch_size,
+                        "lr": float(optimizer.param_groups[0]["lr"]),
+                    }
+                )
 
             if global_step % log_interval == 0 or global_step == total_steps:
                 metrics: Dict[str, float] = {}
@@ -305,6 +612,8 @@ def main(cfg: DictConfig) -> None:
             seen_items.get("val", {}),
             device,
             topk=topk,
+            split_name="val",
+            log_predictions=(epoch == 0),
         )
         if device.type == "cuda" and torch.cuda.is_available():
             torch.cuda.synchronize(device)
@@ -314,6 +623,15 @@ def main(cfg: DictConfig) -> None:
             f"Eval step {global_step:05d} • {_format_split_metrics('val', val_metrics)} "
             f"• time={format_duration(val_time)}"
         )
+        if trace_path is not None:
+            trace_eval_records.append(
+                {
+                    "step": global_step,
+                    "split": "val",
+                    "kind": "epoch",
+                    **{name: float(value) for name, value in val_metrics.items()},
+                }
+            )
         current_ndcg = val_metrics[f"NDCG@{topk}"]
         if current_ndcg > best_ndcg:
             best_ndcg = current_ndcg
@@ -343,6 +661,7 @@ def main(cfg: DictConfig) -> None:
         seen_items.get("test", {}),
         device,
         topk=topk,
+        split_name="test",
     )
     if device.type == "cuda" and torch.cuda.is_available():
         torch.cuda.synchronize(device)
@@ -351,6 +670,15 @@ def main(cfg: DictConfig) -> None:
         f"Eval final • {_format_split_metrics('test', test_metrics)} "
         f"• time={format_duration(test_time)}"
     )
+    if trace_path is not None:
+        trace_eval_records.append(
+            {
+                "step": global_step,
+                "split": "test",
+                "kind": "final",
+                **{name: float(value) for name, value in test_metrics.items()},
+            }
+        )
 
     efficiency = probe_efficiency(best_train_time, test_time, best_peak_gb)
     summary = {
@@ -373,4 +701,9 @@ def main(cfg: DictConfig) -> None:
     summary_parts.append(f"infer_s={efficiency['infer_s']:.2f}")
     summary_parts.append(f"gpu_gb={efficiency['gpu_gb']:.2f}")
     print(" • ".join(summary_parts))
+
+    if trace_path is not None:
+        trace_payload = {"train": trace_records, "eval": trace_eval_records}
+        with trace_path.open("w", encoding="utf-8") as handle:
+            json.dump(trace_payload, handle, indent=2)
     print(f"Summary • path={summary_path}")

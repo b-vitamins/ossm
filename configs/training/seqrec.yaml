@@ -11,3 +11,7 @@ topk: 10
 save_dir: ${paths.work_dir}/seqrec
 config_name: default
 prefetch_depth: 2
+log_interval: null
+max_steps: null
+trace_path: null
+trace_steps: 0

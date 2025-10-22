@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import partial
 from typing import List, Tuple
 
+import pytest
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -37,3 +38,12 @@ def test_evaluate_fullsort_masks_history() -> None:
     seen_items = {0: torch.tensor([2])}
     metrics = evaluate_fullsort(model, loader, seen_items, torch.device("cpu"), topk=1)
     assert metrics["HR@1"] == 0.0
+
+
+def test_evaluate_fullsort_raises_when_topk_exceeds_candidates() -> None:
+    dataset = _ToyDataset()
+    loader = DataLoader(dataset, batch_size=1, collate_fn=partial(collate_left_pad, max_len=4))
+    model = _DummyModel()
+    seen_items = {0: torch.tensor([1, 2])}
+    with pytest.raises(RuntimeError, match="candidate pool is smaller"):
+        evaluate_fullsort(model, loader, seen_items, torch.device("cpu"), topk=5)
