@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import warnings
 from typing import Optional, Protocol, cast
 
 import torch
@@ -13,111 +12,11 @@ from .linoss import _run_associative_scan
 
 __all__ = ["run_dlinoss_imex1", "has_kernels", "extension_error"]
 
-class _DlinossKernels(Protocol):
-    def dlinoss_imex1_forward(
-        self, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Tensor
-    ) -> Tensor: ...
 
-    def dlinoss_imex1_backward(
-        self,
-        a_diag: Tensor,
-        g_diag: Tensor,
-        step: Tensor,
-        bu: Tensor,
-        states: Tensor,
-        grad_output: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]: ...
-
-
-try:
-    from ossm import _kernels as _kernels  # type: ignore[attr-defined]
-except ImportError as exc:  # pragma: no cover - build-time failure surface
-    _kernels: Optional[_DlinossKernels] = None
-    _EXTENSION_ERROR: Optional[Exception] = exc
-else:
-    _kernels = cast("_DlinossKernels", _kernels)
-    _EXTENSION_ERROR = None
-
-    # Enable ``torch.compile`` and Dynamo to treat the PyCapsule entry points as
-    # graph-friendly primitives instead of emitting loud warnings during
-    # tracing.  The helpers are optional so we guard them defensively to keep
-    # import-time behavior identical on older PyTorch wheels.
-    try:  # pragma: no cover - import guard only exercised with recent PyTorch
-        import torch._dynamo as _torch_dynamo  # type: ignore[attr-defined]
-
-        try:
-            _torch_dynamo.allow_in_graph(_kernels.dlinoss_imex1_forward)
-            _torch_dynamo.allow_in_graph(_kernels.dlinoss_imex1_backward)
-        except AttributeError:
-            pass
-    except ImportError:  # pragma: no cover - dependency not present
-        pass
-
-    try:  # pragma: no cover - ``torch.compiler`` may be unavailable
-        import torch.compiler as _torch_compiler  # type: ignore[attr-defined]
-
-        try:
-            _torch_compiler.allow_in_graph(_kernels.dlinoss_imex1_forward)
-            _torch_compiler.allow_in_graph(_kernels.dlinoss_imex1_backward)
-        except AttributeError:
-            pass
-    except ImportError:
-        pass
-
-
-_WARNED_COMPILE_FALLBACK = False
-
-
-def _trace(message: str) -> None:
-    if os.environ.get("OSSM_DLINOSS_TRACE"):
-        print(message, flush=True)
-
-
-def has_kernels() -> bool:
-    """Return ``True`` when the D-LinOSS kernels are importable."""
-
-    return _kernels is not None and hasattr(_kernels, "dlinoss_imex1_forward")
-
-
-def extension_error() -> Optional[Exception]:
-    """Return the cached import/build error for the D-LinOSS kernels, if any."""
-
-    return _EXTENSION_ERROR
-
-
-def _use_kernels() -> bool:
-    if os.environ.get("OSSM_DLINOSS_DISABLE_KERNEL"):
-        return False
-
-    try:  # pragma: no cover - ``torch._dynamo`` may be absent on older builds
-        import torch._dynamo as _torch_dynamo  # type: ignore[attr-defined]
-
-        if _torch_dynamo.is_compiling():
-            # ``torch.compile`` drives tracing with ``FakeTensor`` instances
-            # that deliberately lack storage.  The custom kernels expect real
-            # storage so we fall back to the pure PyTorch reference when the
-            # graph is being captured.  ``torch`` will then trace the fallback
-            # implementation directly, producing a graph that is agnostic to
-            # the extension while the eager path continues to benefit from the
-            # optimized kernels.
-            global _WARNED_COMPILE_FALLBACK
-            if not _WARNED_COMPILE_FALLBACK and has_kernels():
-                warnings.warn(
-                    "D-LinOSS kernels are temporarily disabled while torch.compile "
-                    "captures a graph; falling back to the PyTorch reference.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                _WARNED_COMPILE_FALLBACK = True
-            return False
-    except ImportError:
-        pass
-
-    return has_kernels()
-
-
-def _fallback_dlinoss_imex1(a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Tensor) -> Tensor:
-    """Pure PyTorch fallback matching the reference recurrence."""
+def _reference_dlinoss_states(
+    a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Tensor
+) -> Tensor:
+    """Pure PyTorch recurrence returning the full latent state trajectory."""
 
     device = bu.device
     dtype = bu.dtype
@@ -145,7 +44,152 @@ def _fallback_dlinoss_imex1(a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Te
         dim=-2,
     )
     b_elems = torch.stack((f1, f2), dim=-1)
-    states = _run_associative_scan(a_matrix, b_elems)
+    return _run_associative_scan(a_matrix, b_elems)
+
+class _DlinossKernels(Protocol):
+    def dlinoss_imex1_forward(
+        self, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Tensor
+    ) -> Tensor: ...
+
+    def dlinoss_imex1_backward(
+        self,
+        a_diag: Tensor,
+        g_diag: Tensor,
+        step: Tensor,
+        bu: Tensor,
+        states: Tensor,
+        grad_output: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]: ...
+
+
+_CUSTOM_OP_AVAILABLE = False
+
+
+try:
+    from ossm import _kernels as _kernels  # type: ignore[attr-defined]
+except ImportError as exc:  # pragma: no cover - build-time failure surface
+    _kernels: Optional[_DlinossKernels] = None
+    _EXTENSION_ERROR: Optional[Exception] = exc
+else:
+    _kernels = cast("_DlinossKernels", _kernels)
+    kernels_ref: _DlinossKernels = _kernels
+    _EXTENSION_ERROR = None
+
+    # Register custom operators so ``torch.compile`` can trace the kernels using
+    # fake tensors while still lowering to the optimized extension at runtime.
+    try:  # pragma: no cover - ``torch.library`` is unavailable on very old wheels
+        from torch.library import Library
+
+        _CUSTOM_OP_LIBRARY: Optional[Library] = None
+
+        try:
+            _CUSTOM_OP_LIBRARY = Library("ossm", "DEF")
+            _CUSTOM_OP_LIBRARY.define(
+                "dlinoss_imex1_forward(Tensor a_diag, Tensor g_diag, Tensor step, Tensor bu) -> Tensor"
+            )
+            _CUSTOM_OP_LIBRARY.define(
+                "dlinoss_imex1_backward(Tensor a_diag, Tensor g_diag, Tensor step, Tensor bu, Tensor states, Tensor grad_output) -> (Tensor, Tensor, Tensor, Tensor)"
+            )
+        except RuntimeError:
+            # The operators may already be defined when multiple OSSM modules are
+            # imported in the same interpreter.  In that case we simply look them
+            # up and continue registering implementations.
+            _CUSTOM_OP_LIBRARY = Library("ossm", "IMPL")
+
+        if _CUSTOM_OP_LIBRARY is not None:
+            def _dlinoss_forward_composite(
+                a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Tensor
+            ) -> Tensor:
+                return kernels_ref.dlinoss_imex1_forward(a_diag, g_diag, step, bu)
+
+            def _dlinoss_backward_composite(
+                a_diag: Tensor,
+                g_diag: Tensor,
+                step: Tensor,
+                bu: Tensor,
+                states: Tensor,
+                grad_output: Tensor,
+            ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+                return kernels_ref.dlinoss_imex1_backward(
+                    a_diag, g_diag, step, bu, states, grad_output
+                )
+
+            _CUSTOM_OP_LIBRARY.impl(
+                "dlinoss_imex1_forward",
+                _dlinoss_forward_composite,
+                "CompositeExplicitAutograd",
+            )
+            _CUSTOM_OP_LIBRARY.impl(
+                "dlinoss_imex1_backward",
+                _dlinoss_backward_composite,
+                "CompositeExplicitAutograd",
+            )
+
+            def _dlinoss_forward_meta(
+                a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Tensor
+            ) -> Tensor:
+                return _reference_dlinoss_states(a_diag, g_diag, step, bu)
+
+            def _dlinoss_backward_meta(
+                a_diag: Tensor,
+                g_diag: Tensor,
+                step: Tensor,
+                bu: Tensor,
+                states: Tensor,
+                grad_output: Tensor,
+            ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+                del states, grad_output
+                return (
+                    torch.empty_like(a_diag),
+                    torch.empty_like(g_diag),
+                    torch.empty_like(step),
+                    torch.empty_like(bu),
+                )
+
+            try:
+                _CUSTOM_OP_LIBRARY.impl(
+                    "dlinoss_imex1_forward", _dlinoss_forward_meta, "Meta"
+                )
+                _CUSTOM_OP_LIBRARY.impl(
+                    "dlinoss_imex1_backward", _dlinoss_backward_meta, "Meta"
+                )
+            except RuntimeError:
+                # Meta kernels may already be present; that's acceptable.
+                pass
+
+            _CUSTOM_OP_AVAILABLE = True
+    except ImportError:
+        pass
+
+
+def _trace(message: str) -> None:
+    if os.environ.get("OSSM_DLINOSS_TRACE"):
+        print(message, flush=True)
+
+
+def has_kernels() -> bool:
+    """Return ``True`` when the D-LinOSS kernels are importable."""
+
+    return _kernels is not None and hasattr(_kernels, "dlinoss_imex1_forward")
+
+
+def extension_error() -> Optional[Exception]:
+    """Return the cached import/build error for the D-LinOSS kernels, if any."""
+
+    return _EXTENSION_ERROR
+
+
+def _use_kernels() -> bool:
+    if os.environ.get("OSSM_DLINOSS_DISABLE_KERNEL"):
+        return False
+
+    return has_kernels()
+
+
+def _fallback_dlinoss_imex1(a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Tensor) -> Tensor:
+    """Pure PyTorch fallback matching the reference recurrence."""
+
+    states = _reference_dlinoss_states(a_diag, g_diag, step, bu)
     return states[..., 1]
 
 
@@ -164,7 +208,10 @@ class _DlinossImex1Fn(torch.autograd.Function):
         if kernels is None:
             raise RuntimeError("D-LinOSS kernels are unavailable; cannot use optimized path.")
 
-        states = kernels.dlinoss_imex1_forward(a_diag, g_diag, step, bu)
+        if _CUSTOM_OP_AVAILABLE:
+            states = torch.ops.ossm.dlinoss_imex1_forward(a_diag, g_diag, step, bu)
+        else:
+            states = kernels.dlinoss_imex1_forward(a_diag, g_diag, step, bu)
         ctx.save_for_backward(a_diag, g_diag, step, bu, states)
         return states[..., 1]
 
@@ -178,9 +225,14 @@ class _DlinossImex1Fn(torch.autograd.Function):
         if kernels is None:
             raise RuntimeError("D-LinOSS kernels are unavailable; cannot use optimized path.")
 
-        grad_a, grad_g, grad_step, grad_bu = kernels.dlinoss_imex1_backward(
-            a_diag, g_diag, step, bu, states, grad_output.contiguous()
-        )
+        if _CUSTOM_OP_AVAILABLE:
+            grad_a, grad_g, grad_step, grad_bu = torch.ops.ossm.dlinoss_imex1_backward(
+                a_diag, g_diag, step, bu, states, grad_output.contiguous()
+            )
+        else:
+            grad_a, grad_g, grad_step, grad_bu = kernels.dlinoss_imex1_backward(
+                a_diag, g_diag, step, bu, states, grad_output.contiguous()
+            )
         return grad_a, grad_g, grad_step, grad_bu
 
 
