@@ -601,6 +601,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         help="Override the training batch size.",
     )
     loader_group.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=None,
+        help="Override the validation/test batch size (seqrec only).",
+    )
+    loader_group.add_argument(
         "--num-workers",
         type=int,
         default=None,
@@ -829,6 +835,8 @@ def _compose_config(args: argparse.Namespace, extra_overrides: Sequence[str]) ->
         overrides.append(f"dataloader.batch_size={args.batch_size}")
         if task == "seqrec":
             overrides.append(f"training.batch_size={args.batch_size}")
+    if args.eval_batch_size is not None and task == "seqrec":
+        overrides.append(f"training.eval_batch_size={args.eval_batch_size}")
     if args.num_workers is not None:
         overrides.append(f"dataloader.num_workers={args.num_workers}")
         if task == "seqrec":
