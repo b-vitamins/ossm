@@ -16,9 +16,12 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+import jax.tree_util as jtu
 import torch
 
 jax.config.update("jax_enable_x64", True)
+
+_JAX_ARRAY_TYPE = getattr(jax, "Array", type(jnp.asarray(0.0)))
 
 
 def _ensure_linoss_repo() -> None:
@@ -72,16 +75,16 @@ def _to_numpy(tensor: torch.Tensor) -> jnp.ndarray:
     return jnp.asarray(tensor.detach().cpu().numpy())
 
 
-def _promote_param(value: jnp.ndarray) -> jnp.ndarray:
-    if jnp.issubdtype(value.dtype, jnp.floating):
-        return value.astype(jnp.float64)
-    if jnp.issubdtype(value.dtype, jnp.complexfloating):
-        return value.astype(jnp.complex128)
-    return value
+def _promote_tree_to_64bits(tree):
+    def _promote(value):
+        if isinstance(value, _JAX_ARRAY_TYPE):
+            if jnp.issubdtype(value.dtype, jnp.floating):
+                return value.astype(jnp.float64)
+            if jnp.issubdtype(value.dtype, jnp.complexfloating):
+                return value.astype(jnp.complex128)
+        return value
 
-
-def _params_to_64bits(params: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
-    return {name: _promote_param(value) for name, value in params.items()}
+    return jtu.tree_map(_promote, tree)
 
 
 def _build_layers(ssm_size: int, hidden_dim: int, *, blocks: int, discretization: str):
@@ -114,7 +117,7 @@ def _build_layers(ssm_size: int, hidden_dim: int, *, blocks: int, discretization
     for name, value in params.items():
         object.__setattr__(jax_layer, name, value)
 
-    return layer, jax_layer, params
+    return layer, jax_layer
 
 
 def _measure_torch(layer: torch_s5.S5Layer, inputs: torch.Tensor, *, disable_kernel: bool) -> tuple[float, torch.Tensor]:
@@ -163,7 +166,7 @@ def main() -> None:
     blocks = 1
     discretization = "zoh"
 
-    layer, jax_layer, params = _build_layers(ssm_size, hidden_dim, blocks=blocks, discretization=discretization)
+    layer, jax_layer = _build_layers(ssm_size, hidden_dim, blocks=blocks, discretization=discretization)
 
     torch_input = torch.randn(1, seq_len, hidden_dim, dtype=torch.float32)
     jax_input = _to_numpy(torch_input.squeeze(0))
@@ -184,22 +187,7 @@ def main() -> None:
     with torch.no_grad():
         torch_double_out = layer_double(torch_input_double)
 
-    params64 = _params_to_64bits(params)
-    jax_layer64 = JaxS5Layer(
-        ssm_size,
-        blocks,
-        hidden_dim,
-        "lecun_normal",
-        True,
-        False,
-        discretization,
-        0.001,
-        0.1,
-        1.0,
-        key=jr.PRNGKey(1),
-    )
-    for name, value in params64.items():
-        object.__setattr__(jax_layer64, name, value)
+    jax_layer64 = _promote_tree_to_64bits(jax_layer)
 
     jax_double_in = jnp.asarray(
         torch_input_double.squeeze(0).detach().cpu().numpy(), dtype=jnp.float64
