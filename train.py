@@ -700,7 +700,21 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         help="Override the Hydra work directory (paths.work_dir).",
     )
 
-    args, unknown = parser.parse_known_args(argv)
+    argv_list: Sequence[str]
+    if argv is None:
+        argv_list = sys.argv[1:]
+    else:
+        argv_list = list(argv)
+
+    args, unknown = parser.parse_known_args(argv_list)
+
+    device_flag = False
+    for entry in argv_list:
+        if entry == "--device" or entry.startswith("--device="):
+            device_flag = True
+            break
+
+    setattr(args, "_device_from_cli", device_flag)
     return args, unknown
 
 
@@ -1032,8 +1046,9 @@ def run_training(cfg: DictConfig, device: torch.device, runtime: _RuntimeSetting
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args, extra = parse_args(argv)
     cfg = _compose_config(args, extra)
+    device_from_cli = getattr(args, "_device_from_cli", False)
     if str(cfg.training.get("task", "")) == "seqrec":
-        if args.device:
+        if device_from_cli:
             cfg.training.device = args.device
         seqrec_main(cfg)
         return
