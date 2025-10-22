@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader
 from ..data.datasets import SeqRecEvalDataset, SeqRecTrainDataset, collate_left_pad
 from ..metrics import TopKMetricAccumulator, mask_history_inplace
 from ..models.dlinossrec import Dlinoss4Rec
+from ..models.mambarec import Mamba4Rec
 from .progress import ProgressReporter, format_duration
 
 # Resolve AMP utilities in a version-tolerant manner without triggering type-checker errors.
@@ -281,19 +282,12 @@ def _warn_if_placeholder_dataset(summary: Dict[str, Any], dataset_name: str) -> 
     )
 
 
-def build_model(cfg: DictConfig, num_items: int, max_len: int) -> Dlinoss4Rec:
+def build_model(cfg: DictConfig, num_items: int, max_len: int) -> Dlinoss4Rec | Mamba4Rec:
     model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
     if not isinstance(model_cfg, dict):  # pragma: no cover - config guard
         raise TypeError("Model configuration must resolve to a mapping")
     cfg_dict = dict(model_cfg)
-    cfg_dict.pop("model_name", None)
-    d_model = int(cfg_dict.pop("d_model"))
-    ssm_size = int(cfg_dict.pop("ssm_size"))
-    blocks = int(cfg_dict.pop("blocks"))
-    dropout = float(cfg_dict.pop("dropout"))
-    use_pffn = bool(cfg_dict.pop("use_pffn", True))
-    use_pos_emb = bool(cfg_dict.pop("use_pos_emb", False))
-    use_layernorm = bool(cfg_dict.pop("use_layernorm", True))
+    model_name = str(cfg_dict.pop("model_name", "dlinossrec")).lower()
 
     head_cfg = OmegaConf.to_container(cfg.head, resolve=True)
     if isinstance(head_cfg, dict):
@@ -303,26 +297,79 @@ def build_model(cfg: DictConfig, num_items: int, max_len: int) -> Dlinoss4Rec:
         head_bias = True
         head_temperature = 1.0
 
-    model = Dlinoss4Rec(
-        num_items=num_items,
-        d_model=d_model,
-        ssm_size=ssm_size,
-        blocks=blocks,
-        dropout=dropout,
-        max_len=max_len,
-        use_pffn=use_pffn,
-        use_pos_emb=use_pos_emb,
-        use_layernorm=use_layernorm,
-        head_bias=head_bias,
-        head_temperature=head_temperature,
-        **cfg_dict,
-    )
-    return model
+    if model_name == "dlinossrec":
+        dlinoss_cfg = dict(cfg_dict)
+        d_model = int(dlinoss_cfg.pop("d_model"))
+        ssm_size = int(dlinoss_cfg.pop("ssm_size"))
+        blocks = int(dlinoss_cfg.pop("blocks"))
+        dropout = float(dlinoss_cfg.pop("dropout"))
+        use_pffn = bool(dlinoss_cfg.pop("use_pffn", True))
+        use_pos_emb = bool(dlinoss_cfg.pop("use_pos_emb", False))
+        use_layernorm = bool(dlinoss_cfg.pop("use_layernorm", True))
+        return Dlinoss4Rec(
+            num_items=num_items,
+            d_model=d_model,
+            ssm_size=ssm_size,
+            blocks=blocks,
+            dropout=dropout,
+            max_len=max_len,
+            use_pffn=use_pffn,
+            use_pos_emb=use_pos_emb,
+            use_layernorm=use_layernorm,
+            head_bias=head_bias,
+            head_temperature=head_temperature,
+            **dlinoss_cfg,
+        )
+    if model_name == "mambarec":
+        mamba_cfg = dict(cfg_dict)
+        d_model = int(mamba_cfg.pop("d_model"))
+        ssm_size = int(mamba_cfg.pop("ssm_size"))
+        blocks = int(mamba_cfg.pop("blocks"))
+        dropout = float(mamba_cfg.pop("dropout"))
+        use_pffn = bool(mamba_cfg.pop("use_pffn", True))
+        use_pos_emb = bool(mamba_cfg.pop("use_pos_emb", False))
+        use_layernorm = bool(mamba_cfg.pop("use_layernorm", True))
+        d_conv = int(mamba_cfg.pop("d_conv", 4))
+        expand = int(mamba_cfg.pop("expand", 2))
+        dt_rank_cfg = mamba_cfg.pop("dt_rank", "auto")
+        dt_rank = dt_rank_cfg if isinstance(dt_rank_cfg, str) else int(dt_rank_cfg)
+        dt_min = float(mamba_cfg.pop("dt_min", 0.001))
+        dt_max = float(mamba_cfg.pop("dt_max", 0.1))
+        dt_init = str(mamba_cfg.pop("dt_init", "random"))
+        dt_scale = float(mamba_cfg.pop("dt_scale", 1.0))
+        dt_init_floor = float(mamba_cfg.pop("dt_init_floor", 1e-4))
+        conv_bias = bool(mamba_cfg.pop("conv_bias", True))
+        bias = bool(mamba_cfg.pop("bias", False))
+        return Mamba4Rec(
+            num_items=num_items,
+            d_model=d_model,
+            ssm_size=ssm_size,
+            blocks=blocks,
+            dropout=dropout,
+            max_len=max_len,
+            use_pffn=use_pffn,
+            use_pos_emb=use_pos_emb,
+            use_layernorm=use_layernorm,
+            head_bias=head_bias,
+            head_temperature=head_temperature,
+            d_conv=d_conv,
+            expand=expand,
+            dt_rank=dt_rank,
+            dt_min=dt_min,
+            dt_max=dt_max,
+            dt_init=dt_init,
+            dt_scale=dt_scale,
+            dt_init_floor=dt_init_floor,
+            conv_bias=conv_bias,
+            bias=bias,
+            **mamba_cfg,
+        )
+    raise ValueError(f"Unknown sequential recommendation model '{model_name}'")
 
 
 @torch.no_grad()
 def evaluate_fullsort(
-    model: Dlinoss4Rec,
+    model: Dlinoss4Rec | Mamba4Rec,
     loader: DataLoader,
     seen_items: Dict[int, torch.Tensor],
     device: torch.device,
@@ -690,7 +737,7 @@ def main(cfg: DictConfig) -> None:
         )
         if device.type == "cuda" and torch.cuda.is_available():
             torch.cuda.synchronize(device)
-        val_time = time.perf_counter() - val_start
+        _val_time = time.perf_counter() - val_start
         last_eval["val"] = val_metrics
         print(f"Eval epoch {epoch + 1:03d} • {_format_split_metrics('val', val_metrics)}")
         if trace_path is not None:

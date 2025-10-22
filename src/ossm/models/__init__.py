@@ -4,6 +4,7 @@ from .base import Backbone, Head, SequenceBackboneOutput
 from .heads import ClassificationHead, RegressionHead, TiedSoftmaxHead
 from .dlinoss import DampedLinOSSBackbone, DampedLinOSSBlock, DampedLinOSSLayer
 from .dlinossrec import Dlinoss4Rec, ItemEmbeddingEncoder
+from .mambarec import Mamba4Rec, MambaLayer
 from .linoss import LinOSSBackbone, LinOSSBlock, LinOSSLayer
 from .lru import LRUBackbone, LRUBlock, LRULayer
 from .ncde import NCDEBackbone, NCDELayer, NCDEVectorField, NRDELayer
@@ -29,6 +30,8 @@ __all__ = [
     "DampedLinOSSLayer",
     "Dlinoss4Rec",
     "ItemEmbeddingEncoder",
+    "Mamba4Rec",
+    "MambaLayer",
     "LinOSSBackbone",
     "LinOSSBlock",
     "LinOSSLayer",
