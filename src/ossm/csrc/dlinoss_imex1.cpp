@@ -244,6 +244,11 @@ void dlinoss_imex1_backward_cpu(const at::Tensor& a_diag,
 }
 
 #ifdef WITH_CUDA
+}  // end anonymous namespace
+
+// Declare CUDA implementations with external linkage in the ossm namespace to
+// match the definitions in dlinoss_imex1_cuda.cu and avoid undefined symbols at
+// import time.
 void dlinoss_imex1_forward_cuda(const at::Tensor& a_diag,
                                 const at::Tensor& g_diag,
                                 const at::Tensor& step,
@@ -260,6 +265,8 @@ void dlinoss_imex1_backward_cuda(const at::Tensor& a_diag,
                                  at::Tensor& grad_g,
                                  at::Tensor& grad_step,
                                  at::Tensor& grad_bu);
+
+namespace {  // reopen anonymous namespace for the remaining helpers
 #endif
 
 }  // namespace

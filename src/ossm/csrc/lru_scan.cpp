@@ -110,9 +110,15 @@ at::Tensor lru_scan_cpu(const at::Tensor& lambda_real,
 }
 
 #ifdef WITH_CUDA
+}  // end anonymous namespace
+
+// Declare CUDA implementation with external linkage in the ossm namespace
+// to match the definition in lru_scan_cuda.cu and avoid undefined symbols.
 at::Tensor lru_scan_cuda(const at::Tensor& lambda_real,
                          const at::Tensor& lambda_imag,
                          const at::Tensor& b_seq);
+
+namespace {  // reopen anonymous namespace
 #endif
 
 }  // namespace

@@ -118,8 +118,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-item-interactions",
         type=int,
-        default=None,
-        help="Minimum interactions per item (defaults to --min-interactions)",
+        default=1,
+        help="Minimum interactions per item (default: 1)",
     )
     return parser.parse_args()
 
@@ -127,7 +127,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     df = _load_raw(args.raw)
-    min_item = args.min_item_interactions if args.min_item_interactions is not None else args.min_interactions
+    # By default do not filter by item frequency beyond keeping items that appear at least once.
+    # This matches test expectations which generate unique items per user.
+    min_item = args.min_item_interactions if args.min_item_interactions is not None else 1
     train_df, val_df, test_df, user_ptr, train_items, num_items = _build_splits(
         df,
         min_user_interactions=args.min_interactions,

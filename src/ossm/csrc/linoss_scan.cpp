@@ -96,12 +96,18 @@ void linoss_scan_cpu(const at::Tensor& m11,
 }
 
 #ifdef WITH_CUDA
+}  // end anonymous namespace
+
+// Declare CUDA implementation with external linkage in the ossm namespace
+// to match the definition in linoss_scan_cuda.cu and avoid undefined symbols.
 void linoss_scan_cuda(const at::Tensor& m11,
                       const at::Tensor& m12,
                       const at::Tensor& m21,
                       const at::Tensor& m22,
                       const at::Tensor& b_seq,
                       at::Tensor& output);
+
+namespace {  // reopen anonymous namespace
 #endif
 
 }  // namespace

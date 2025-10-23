@@ -64,11 +64,17 @@ at::Tensor linear_rnn_scan_cpu(const at::Tensor& weight_hh,
 }
 
 #ifdef WITH_CUDA
+}  // end anonymous namespace
+
+// Declare CUDA implementation with external linkage in the ossm namespace
+// to match the definition in rnn_scan_cuda.cu and avoid undefined symbols.
 at::Tensor linear_rnn_scan_cuda(const at::Tensor& weight_hh,
                                 const at::Tensor& weight_xh,
                                 const at::Tensor& bias,
                                 const at::Tensor& inputs,
                                 const at::Tensor& initial_state);
+
+namespace {  // reopen anonymous namespace
 #endif
 
 }  // namespace
