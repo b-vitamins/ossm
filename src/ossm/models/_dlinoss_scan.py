@@ -27,11 +27,16 @@ def _reference_dlinoss_states(
 
     # Ensure the math runs with supported CUDA kernels
     with autocast("cuda", enabled=False):
-        # Keep real-valued scalars in fp32 and complex inputs in complex64
-        a_diag_f = a_diag.float()
-        g_diag_f = g_diag.float()
-        step_f = step.float()
-        bu_c = bu.to(torch.complex64)
+        # Use fp32/complex64 by default, but honor higher precision inputs.
+        real_dtype = torch.float32
+        if a_diag.dtype == torch.float64 or g_diag.dtype == torch.float64 or step.dtype == torch.float64:
+            real_dtype = torch.float64
+        complex_dtype = torch.complex64 if real_dtype == torch.float32 else torch.complex128
+
+        a_diag_f = a_diag.to(dtype=real_dtype)
+        g_diag_f = g_diag.to(dtype=real_dtype)
+        step_f = step.to(dtype=real_dtype)
+        bu_c = bu.to(dtype=complex_dtype)
 
         denom = 1.0 + step_f * g_diag_f
         m11 = 1.0 / denom
@@ -249,6 +254,18 @@ def run_dlinoss_imex1(a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Tensor) 
 
     if bu.numel() == 0:
         return bu
+
+    # The optimized kernels currently operate in single precision.  When
+    # higher-precision inputs are provided we fall back to the reference
+    # implementation to avoid silent downcasting and preserve numerical
+    # parity with the pure PyTorch path.
+    if (
+        a_diag.dtype == torch.float64
+        or g_diag.dtype == torch.float64
+        or step.dtype == torch.float64
+        or bu.dtype == torch.complex128
+    ):
+        return _fallback_dlinoss_imex1(a_diag, g_diag, step, bu)
 
     if _use_kernels():
         try:

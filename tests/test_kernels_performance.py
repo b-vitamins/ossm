@@ -245,15 +245,21 @@ def _setup_complex_case(
         lambda_bar = torch.randn(state, dtype=torch.complex64, device=device)
         b_seq = torch.randn(length, batch, state, dtype=torch.complex64, device=device)
 
-        ext_out = run_fn(lambda_bar, b_seq)
+        with torch.no_grad():
+            ext_out = run_fn(lambda_bar, b_seq)
         if ext_out is None:
             return None, None, f"{name} kernel is unavailable"
 
         def run_extension() -> Tensor:
-            return cast(Tensor, run_fn(lambda_bar, b_seq))
+            with torch.no_grad():
+                result = run_fn(lambda_bar, b_seq)
+            if result is None:
+                raise RuntimeError(f"{name} kernel is unavailable during benchmark")
+            return cast(Tensor, result)
 
         def run_reference() -> Tensor:
-            return _complex_scan_naive(lambda_bar, b_seq)
+            with torch.no_grad():
+                return _complex_scan_naive(lambda_bar, b_seq)
 
         return run_extension, run_reference, None
 
