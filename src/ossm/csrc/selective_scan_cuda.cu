@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cuda_runtime.h>
+#include <math_functions.h>
 
 namespace ossm {
 namespace {
@@ -115,7 +116,7 @@ __global__ void selective_scan_forward_kernel(const float* __restrict__ inputs,
 
       const float delta = dt_scalar * a;
       const float A_bar = __expf(delta);
-      const float phi = __expm1f(delta) * inv_a;
+      const float phi = expm1f(delta) * inv_a;
 
       lane_state = fmaf(A_bar, lane_state, phi * B_step[idx] * input_scalar);
       state[idx] = lane_state;
@@ -230,7 +231,7 @@ __global__ void selective_scan_backward_kernel(const float* __restrict__ grad_ou
 
         const float delta = dt_scalar * a;
         const float A_bar = __expf(delta);
-        const float phi = __expm1f(delta) * inv_a;
+        const float phi = expm1f(delta) * inv_a;
 
         state_prev = fmaf(A_bar, state_prev, phi * B_step[idx] * input_scalar);
         state_ptr[step * state_dim] = state_prev;
@@ -288,7 +289,7 @@ __global__ void selective_scan_backward_kernel(const float* __restrict__ grad_ou
 
         const float delta = dt_scalar * a;
         const float A_bar = __expf(delta);
-        const float phi = __expm1f(delta) * inv_a;
+        const float phi = expm1f(delta) * inv_a;
 
         atomicAdd(grad_C + (static_cast<std::size_t>(b) * length + t) * state_dim + idx,
                   grad_y_scalar * state_t);
