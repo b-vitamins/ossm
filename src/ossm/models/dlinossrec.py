@@ -141,8 +141,10 @@ class Dlinoss4Rec(nn.Module):
         else:
             for block, ffn in zip(self.blocks, self.pffn_blocks):
                 features = ffn(block(features))
-        lengths = mask.sum(dim=1)
-        last_index = lengths.clamp(min=1) - 1
+        seq_len = mask.size(1)
+        positions = torch.arange(seq_len, device=mask.device, dtype=torch.long).unsqueeze(0)
+        mask_indices = mask.to(dtype=positions.dtype)
+        last_index = (positions * mask_indices).amax(dim=1)
         batch_indices = torch.arange(features.size(0), device=features.device)
         return features[batch_indices, last_index]
 
@@ -150,7 +152,7 @@ class Dlinoss4Rec(nn.Module):
         last_hidden = self.forward_features(batch.input_ids, batch.mask)
         return self.head.loss(last_hidden, batch.target)
 
-    def predict_scores(
+    def predict_logits(
         self, batch: "SeqRecBatch", *, include_padding: bool = False
     ) -> torch.Tensor:
         last_hidden = self.forward_features(batch.input_ids, batch.mask)

@@ -390,11 +390,11 @@ def evaluate_fullsort(
     first_batch_debug: Dict[str, torch.Tensor] | None = None
     for batch in loader:
         batch = batch.to(device)
-        scores = model.predict_scores(batch, include_padding=False)
-        mask_history_inplace(scores, batch.user_ids, seen_items, offset=1)
+        logits = model.predict_logits(batch, include_padding=False)
+        mask_history_inplace(logits, batch.user_ids, seen_items, offset=1)
         targets = (batch.target - 1).to(device=device)
-        accumulator.update(scores, targets)
-        finite_mask = torch.isfinite(scores)
+        accumulator.update(logits, targets)
+        finite_mask = torch.isfinite(logits)
         candidate_counts = finite_mask.sum(dim=1)
         total_examples += int(candidate_counts.size(0))
         total_candidates += int(candidate_counts.sum().item())
@@ -405,8 +405,8 @@ def evaluate_fullsort(
         if max_batches is not None and batch_count >= int(max_batches):
             break
         if log_predictions and first_batch_debug is None:
-            topn = min(10, scores.size(1))
-            top_scores, top_indices = torch.topk(scores, topn, dim=1)
+            topn = min(10, logits.size(1))
+            top_scores, top_indices = torch.topk(logits, topn, dim=1)
             first_batch_debug = {
                 "user_ids": batch.user_ids.detach().cpu(),
                 "targets": targets.detach().cpu(),

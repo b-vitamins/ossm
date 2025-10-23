@@ -348,21 +348,17 @@ class Mamba4Rec(nn.Module):
         hidden = self.encoder(input_ids)
         for layer in self.layers:
             hidden = layer(hidden)
-        lengths = mask.to(dtype=torch.long).sum(dim=1)
-        last_index = lengths.clamp(min=1) - 1
+        seq_len = mask.size(1)
+        positions = torch.arange(seq_len, device=mask.device, dtype=torch.long)
+        positions = positions.unsqueeze(0)
+        mask_indices = mask.to(dtype=positions.dtype)
+        last_index = (positions * mask_indices).amax(dim=1)
         batch_indices = torch.arange(hidden.size(0), device=hidden.device)
         return hidden[batch_indices, last_index]
 
     def forward_loss(self, batch: "SeqRecBatch") -> torch.Tensor:
         last_hidden = self.forward_features(batch.input_ids, batch.mask)
         return self.head.loss(last_hidden, batch.target)
-
-    def predict_scores(
-        self, batch: "SeqRecBatch", *, include_padding: bool = False
-    ) -> torch.Tensor:
-        last_hidden = self.forward_features(batch.input_ids, batch.mask)
-        logits = self.head.logits(last_hidden, exclude_padding=not include_padding)
-        return torch.softmax(logits, dim=-1)
 
     def predict_logits(
         self, batch: "SeqRecBatch", *, include_padding: bool = False
