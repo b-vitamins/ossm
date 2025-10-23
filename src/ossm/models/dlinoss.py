@@ -189,6 +189,12 @@ class DampedLinOSSLayer(nn.Module):
         if dtype in (torch.float16, torch.bfloat16):
             compute_dtype = torch.float32
 
+        scan_real_dtype = torch.float32
+        scan_complex_dtype = torch.complex64
+        if compute_dtype == torch.float64:
+            scan_real_dtype = torch.float64
+            scan_complex_dtype = torch.complex128
+
         a_diag, g_diag, step = self._project_parameters(device=device, dtype=compute_dtype)
 
         b_real = self.B[..., 0].to(device=device, dtype=compute_dtype)
@@ -208,16 +214,18 @@ class DampedLinOSSLayer(nn.Module):
         bu_real = flat_inputs @ b_real_t
         bu_imag = flat_inputs @ b_imag_t
         # Force complex64 to avoid ComplexHalf kernels
-        bu = (
-            torch.complex(bu_real.float(), bu_imag.float())
-            .to(torch.complex64)
-            .reshape(batch, length, self.ssm_size)
-        )
+        bu = torch.complex(
+            bu_real.to(dtype=scan_real_dtype),
+            bu_imag.to(dtype=scan_real_dtype),
+        ).to(dtype=scan_complex_dtype).reshape(batch, length, self.ssm_size)
 
         # Run the scan in fp32/complex64 regardless of surrounding dtype
         with autocast("cuda", enabled=False):
             outputs_complex = self._apply_damped_imex1(
-                a_diag.float(), g_diag.float(), step.float(), bu.to(torch.complex64)
+                a_diag.to(dtype=scan_real_dtype),
+                g_diag.to(dtype=scan_real_dtype),
+                step.to(dtype=scan_real_dtype),
+                bu.to(dtype=scan_complex_dtype),
             )
 
         states = outputs_complex.reshape(batch * length, self.ssm_size)
