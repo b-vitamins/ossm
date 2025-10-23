@@ -269,6 +269,8 @@ def _setup_rnn_case(
     def _inner(device: torch.device) -> Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]:
         torch.manual_seed(0)
         if device.type == "cuda":
+            if not torch.cuda.is_available():
+                return None, None, "CUDA is unavailable"
             torch.cuda.manual_seed_all(0)
 
         weight_hh = torch.randn(hidden_dim, hidden_dim, dtype=torch.float32, device=device)
@@ -280,6 +282,8 @@ def _setup_rnn_case(
         ext_out = try_run_linear_rnn_scan(weight_hh, weight_xh, bias, inputs, initial_state)
         if ext_out is None:
             return None, None, "Linear RNN kernel is unavailable"
+        if ext_out.device != device:
+            return None, None, "Linear RNN kernel produced outputs on an unexpected device"
 
         def run_extension() -> Tensor:
             return cast(

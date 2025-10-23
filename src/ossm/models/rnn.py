@@ -77,7 +77,11 @@ class _LinearRNNScanFn(Function):
         if ext_result is None:
             states = _linear_rnn_reference(weight_hh, weight_xh, bias, inputs, initial_state)
         else:
-            states = cast(Tensor, ext_result)
+            ext_tensor = cast(Tensor, ext_result)
+            if ext_tensor.device != inputs.device:
+                states = _linear_rnn_reference(weight_hh, weight_xh, bias, inputs, initial_state)
+            else:
+                states = ext_tensor
         states = states.contiguous()
         ctx.save_for_backward(weight_hh, weight_xh, bias, inputs, initial_state, states)
         return states
