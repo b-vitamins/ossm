@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from typing import Optional, Protocol, cast
 
 import torch
@@ -11,6 +12,12 @@ from torch import Tensor, autocast
 from .linoss import _run_associative_scan
 
 __all__ = ["run_dlinoss_imex1", "has_kernels", "extension_error"]
+
+
+if os.environ.get("TORCHINDUCTOR_USE_OPENSSL") is None and shutil.which("openssl") is None:
+    # TorchInductor shells out to ``openssl`` for hashing; fall back to the builtin
+    # Python implementation when the binary is unavailable to avoid runtime errors.
+    os.environ["TORCHINDUCTOR_USE_OPENSSL"] = "0"
 
 
 def _reference_dlinoss_states(
