@@ -221,14 +221,13 @@ class DampedLinOSSLayer(nn.Module):
             )
 
         states = outputs_complex.reshape(batch * length, self.ssm_size)
-        states_real = states.real
-        states_imag = states.imag
+        states_real = states.real.to(dtype=compute_dtype)
+        states_imag = states.imag.to(dtype=compute_dtype)
 
-        proj_dtype = states_real.dtype
-        c_real_t = c_real.transpose(0, 1).to(dtype=proj_dtype)
-        c_imag_t = c_imag.transpose(0, 1).to(dtype=proj_dtype)
+        c_real_t = c_real.transpose(0, 1).to(dtype=compute_dtype)
+        c_imag_t = c_imag.transpose(0, 1).to(dtype=compute_dtype)
         projected_real = states_real @ c_real_t - states_imag @ c_imag_t
-        projected = projected_real.reshape(batch, length, self.hidden_dim).to(dtype=compute_dtype)
+        projected = projected_real.reshape(batch, length, self.hidden_dim)
         du = layer_inputs * d_vec
         outputs = projected + du
         if compute_dtype == dtype:
