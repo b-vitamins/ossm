@@ -32,7 +32,7 @@ def _selective_scan_discretized(
     B_t: torch.Tensor,
     C_t: torch.Tensor,
 ) -> torch.Tensor:
-    """Selective SSM recurrence with exact diagonal discretization.
+    r"""Selective SSM recurrence with exact diagonal discretization.
 
     The recurrence follows Algorithm 1 of the paper:
 

@@ -6,7 +6,7 @@ import os
 from typing import Optional, Protocol, cast
 
 import torch
-from torch import Tensor
+from torch import Tensor, autocast
 
 from .linoss import _run_associative_scan
 
@@ -19,7 +19,7 @@ def _reference_dlinoss_states(
     """Pure PyTorch recurrence returning the full latent state trajectory."""
 
     # Ensure the math runs with supported CUDA kernels
-    with torch.amp.autocast("cuda", enabled=False):
+    with autocast("cuda", enabled=False):
         # Keep real-valued scalars in fp32 and complex inputs in complex64
         a_diag_f = a_diag.float()
         g_diag_f = g_diag.float()

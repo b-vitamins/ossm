@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Tuple
 
 import torch
-from torch import Tensor, nn
+from torch import Tensor, nn, autocast
 
 from ._dlinoss_scan import run_dlinoss_imex1
 from .base import Backbone, SequenceBackboneOutput
@@ -215,7 +215,7 @@ class DampedLinOSSLayer(nn.Module):
         )
 
         # Run the scan in fp32/complex64 regardless of surrounding dtype
-        with torch.amp.autocast("cuda", enabled=False):
+        with autocast("cuda", enabled=False):
             outputs_complex = self._apply_damped_imex1(
                 a_diag.float(), g_diag.float(), step.float(), bu.to(torch.complex64)
             )
