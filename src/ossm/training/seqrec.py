@@ -526,10 +526,8 @@ def main(cfg: DictConfig) -> None:
 
     progress = ProgressReporter(total_steps, style="minimal")
     last_eval: Dict[str, Dict[str, float]] = {}
-    best_hr = float("-inf")
-    best_epoch = -1
-    best_train_time = 0.0
-    best_peak_gb = 0.0
+    tracked_checkpoint_metrics = [f"HR@{topk}", f"NDCG@{topk}", f"MRR@{topk}"]
+    best_checkpoints: Dict[str, Dict[str, Any]] = {}
     global_step = 0
     topk = int(cfg.training.topk)
     eval_interval_cfg = cfg.training.get("eval_interval")
@@ -659,30 +657,57 @@ def main(cfg: DictConfig) -> None:
                     **{name: float(value) for name, value in val_metrics.items()},
                 }
             )
-        current_hr = val_metrics[f"HR@{topk}"]
-        if current_hr > best_hr:
-            best_hr = current_hr
-            best_epoch = epoch
-            best_train_time = epoch_duration
-            if device.type == "cuda" and torch.cuda.is_available():
-                best_peak_gb = torch.cuda.max_memory_allocated(device) / 1e9
-            else:
-                best_peak_gb = 0.0
-            torch.save(model.state_dict(), output_dir / "best.pt")
-            print(
-                f"Checkpoint • epoch={epoch + 1} "
-                f"metric=HR@{topk} value={current_hr:.4f}"
-            )
+        checkpoint_state: Dict[str, Any] | None = None
+        for metric_name in tracked_checkpoint_metrics:
+            current_value = float(val_metrics.get(metric_name, float("-inf")))
+            best_entry = best_checkpoints.get(metric_name)
+            best_value = float(best_entry["value"]) if best_entry is not None else float("-inf")
+            if current_value > best_value:
+                if checkpoint_state is None:
+                    checkpoint_state = model.state_dict()
+                metric_slug = metric_name.lower().replace("@", "_").replace("/", "_")
+                checkpoint_path = output_dir / f"best_{metric_slug}.pt"
+                torch.save(checkpoint_state, checkpoint_path)
+                peak_gb = (
+                    torch.cuda.max_memory_allocated(device) / 1e9
+                    if device.type == "cuda" and torch.cuda.is_available()
+                    else 0.0
+                )
+                best_checkpoints[metric_name] = {
+                    "value": current_value,
+                    "epoch": epoch,
+                    "path": checkpoint_path,
+                    "train_time": epoch_duration,
+                    "peak_gb": peak_gb,
+                }
+                print(
+                    f"Checkpoint • epoch={epoch + 1} "
+                    f"metric={metric_name} value={current_value:.4f}"
+                )
 
         completed_epoch_times.append(epoch_duration)
         avg_epoch_seconds = sum(completed_epoch_times) / len(completed_epoch_times)
 
     progress.summary()
 
-    if best_epoch >= 0:
-        state = torch.load(output_dir / "best.pt", map_location=device)
+    primary_metric = tracked_checkpoint_metrics[0] if tracked_checkpoint_metrics else ""
+    selected_metric = primary_metric
+    selected_entry = best_checkpoints.get(primary_metric)
+    if selected_entry is None and best_checkpoints:
+        selected_metric, selected_entry = next(iter(best_checkpoints.items()))
+
+    if selected_entry is not None:
+        state = torch.load(selected_entry["path"], map_location=device)
         model.load_state_dict(state)
-        print(f"Checkpoint • loaded_epoch={best_epoch + 1}")
+        print(
+            f"Checkpoint • loaded_epoch={int(selected_entry['epoch']) + 1} "
+            f"metric={selected_metric}"
+        )
+        best_train_time = float(selected_entry.get("train_time", 0.0))
+        best_peak_gb = float(selected_entry.get("peak_gb", 0.0))
+    else:
+        best_train_time = 0.0
+        best_peak_gb = 0.0
 
     test_start = time.perf_counter()
     test_metrics = evaluate_fullsort(
