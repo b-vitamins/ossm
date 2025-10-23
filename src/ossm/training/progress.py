@@ -21,12 +21,13 @@ def format_duration(seconds: float) -> str:
 class ProgressReporter:
     """Lightweight console reporter matching OSSM's training telemetry style."""
 
-    def __init__(self, total_steps: int) -> None:
+    def __init__(self, total_steps: int, *, style: str = "detailed") -> None:
         self.total_steps = max(int(total_steps), 0)
         self.start_time = time.perf_counter()
         self.last_log_time = self.start_time
         self.interval_examples = 0
         self.interval_steps = 0
+        self.style = style if style in {"detailed", "minimal"} else "detailed"
         try:
             self.max_width = int(os.environ.get("OSSM_MAX_LINE_WIDTH", "100"))
         except Exception:
@@ -43,7 +44,7 @@ class ProgressReporter:
         step: int,
         loss: float,
         *,
-        metrics: Optional[Dict[str, float]] = None,
+        metrics: Optional[Dict[str, object]] = None,
         lr: Optional[float] = None,
         epoch: Optional[int] = None,
         total_epochs: Optional[int] = None,
@@ -56,44 +57,65 @@ class ProgressReporter:
         now = time.perf_counter()
         interval = max(now - self.last_log_time, 1e-9)
         elapsed = now - self.start_time
-        remaining_steps = max(self.total_steps - int(step), 0)
-        # Prefer ETA based on recent interval for stability during long runs
-        recent_step_time = interval / max(self.interval_steps, 1)
-        eta = recent_step_time * remaining_steps
-        throughput = (
-            self.interval_examples / interval if self.interval_examples else 0.0
-        )
-        step_time = interval / max(self.interval_steps, 1)
 
-        if prefer_epoch and epoch is not None and epoch_step is not None and epoch_size is not None:
-            epoch_hdr = f"Epoch {int(epoch):03d}"
-            if total_epochs is not None and int(total_epochs) > 0:
-                epoch_hdr = f"{epoch_hdr}/{int(total_epochs):03d}"
-            parts = [f"{epoch_hdr}", f"Batch {int(epoch_step):04d}/{int(epoch_size):04d}", f"Loss = {loss:.4f}"]
+        if self.style == "minimal":
+            parts = []
+            if prefer_epoch and epoch is not None:
+                header = f"Epoch {int(epoch)}"
+                if total_epochs is not None and int(total_epochs) > 0:
+                    header = f"{header}/{int(total_epochs)}"
+                parts.append(header)
+            else:
+                parts.append(f"Step {int(step)}")
+            if epoch_step is not None and epoch_size is not None:
+                parts.append(f"Batch {int(epoch_step)}/{int(epoch_size)}")
+            parts.append(f"Loss={loss:.4f}")
+            if metrics:
+                for name, value in metrics.items():
+                    if isinstance(value, (int, float)):
+                        parts.append(f"{name}={value:.4f}")
+                    else:
+                        parts.append(f"{name}={value}")
+            print(" • ".join(parts))
         else:
-            parts = [f"Step {int(step):05d}/{self.total_steps:05d}", f"Loss = {loss:.4f}"]
-        # Compact metrics: show at most three to avoid overly wide lines
-        if metrics:
-            shown = 0
-            for name, value in metrics.items():
-                parts.append(f"{name}={value:.4f}")
-                shown += 1
-                if shown >= 3:
-                    break
-        if lr is not None:
-            parts.append(f"LR={lr:.2e}")
-        # Put ETA early; other timing/throughput details are appended last
-        parts.append(f"ETA={format_duration(eta)}")
-        parts.append(f"Samples/s={throughput:,.1f}")
-        parts.append(f"Step={step_time * 1e3:.1f}ms")
-        parts.append(f"T={format_duration(elapsed)}")
+            remaining_steps = max(self.total_steps - int(step), 0)
+            # Prefer ETA based on recent interval for stability during long runs
+            recent_step_time = interval / max(self.interval_steps, 1)
+            eta = recent_step_time * remaining_steps
+            throughput = (
+                self.interval_examples / interval if self.interval_examples else 0.0
+            )
+            step_time = interval / max(self.interval_steps, 1)
 
-        line = " • ".join(parts)
-        # Enforce maximum width by dropping least important trailing fields first
-        while len(line) > self.max_width and len(parts) > 3:
-            parts.pop()
+            if prefer_epoch and epoch is not None and epoch_step is not None and epoch_size is not None:
+                epoch_hdr = f"Epoch {int(epoch):03d}"
+                if total_epochs is not None and int(total_epochs) > 0:
+                    epoch_hdr = f"{epoch_hdr}/{int(total_epochs):03d}"
+                parts = [f"{epoch_hdr}", f"Batch {int(epoch_step):04d}/{int(epoch_size):04d}", f"Loss = {loss:.4f}"]
+            else:
+                parts = [f"Step {int(step):05d}/{self.total_steps:05d}", f"Loss = {loss:.4f}"]
+            # Compact metrics: show at most three to avoid overly wide lines
+            if metrics:
+                shown = 0
+                for name, value in metrics.items():
+                    parts.append(f"{name}={value:.4f}")
+                    shown += 1
+                    if shown >= 3:
+                        break
+            if lr is not None:
+                parts.append(f"LR={lr:.2e}")
+            # Put ETA early; other timing/throughput details are appended last
+            parts.append(f"ETA={format_duration(eta)}")
+            parts.append(f"Samples/s={throughput:,.1f}")
+            parts.append(f"Step={step_time * 1e3:.1f}ms")
+            parts.append(f"T={format_duration(elapsed)}")
+
             line = " • ".join(parts)
-        print(line)
+            # Enforce maximum width by dropping least important trailing fields first
+            while len(line) > self.max_width and len(parts) > 3:
+                parts.pop()
+                line = " • ".join(parts)
+            print(line)
 
         self.last_log_time = now
         self.interval_examples = 0

@@ -208,41 +208,6 @@ def _summarize_seqrec_splits(
         "train_test_overlap": len(train_test_overlap),
         "val_test_overlap": len(val_test_overlap),
     }
-    print(
-        "Dataset summary • "
-        f"train_users={summary['train_users']} • "
-        f"train_examples={summary['train_examples']} • "
-        f"train_interactions={summary['train_interactions']} • "
-        f"train_seq_len(min/mean/max)="
-        f"{summary['train_seq_len'][0]}/{summary['train_seq_len'][1]:.1f}/{summary['train_seq_len'][2]} • "
-        f"val_examples={summary['val_examples']} • "
-        f"val_seq_len(min/mean/max)="
-        f"{summary['val_seq_len'][0]}/{summary['val_seq_len'][1]:.1f}/{summary['val_seq_len'][2]} • "
-        f"test_examples={summary['test_examples']} • "
-        f"test_seq_len(min/mean/max)="
-        f"{summary['test_seq_len'][0]}/{summary['test_seq_len'][1]:.1f}/{summary['test_seq_len'][2]}"
-    )
-    print(
-        "Dataset roots • "
-        f"train={summary['train_root']} • "
-        f"val={summary['val_root']} • "
-        f"test={summary['test_root']}"
-    )
-    print(
-        "Split overlap • "
-        f"train∩val={summary['train_val_overlap']} • "
-        f"train∩test={summary['train_test_overlap']} • "
-        f"val∩test={summary['val_test_overlap']}"
-    )
-    if train_val_overlap:
-        preview = sorted(list(train_val_overlap))[:5]
-        print(f"  Example train∩val targets={preview}")
-    if train_test_overlap:
-        preview = sorted(list(train_test_overlap))[:5]
-        print(f"  Example train∩test targets={preview}")
-    if val_test_overlap:
-        preview = sorted(list(val_test_overlap))[:5]
-        print(f"  Example val∩test targets={preview}")
     return summary
 
 
@@ -496,22 +461,13 @@ def main(cfg: DictConfig) -> None:
         val_loader,
         test_loader,
         seen_items,
-        loader_info,
+        _loader_info,
     ) = build_dataloaders(cfg)
     train_dataset: SeqRecTrainDataset = train_loader.dataset  # type: ignore[assignment]
     val_dataset: SeqRecEvalDataset = val_loader.dataset  # type: ignore[assignment]
     test_dataset: SeqRecEvalDataset = test_loader.dataset  # type: ignore[assignment]
     split_summary = _summarize_seqrec_splits(train_dataset, val_dataset, test_dataset)
     _warn_if_placeholder_dataset(split_summary, dataset_name)
-    print(
-        "DataLoader config • "
-        f"train_shuffle={loader_info['train_shuffle']} • "
-        f"val_shuffle={loader_info['val_shuffle']} • "
-        f"test_shuffle={loader_info['test_shuffle']} • "
-        f"num_workers={loader_info['num_workers']} • "
-        f"pin_memory={loader_info['pin_memory']} • "
-        f"max_len={loader_info['max_len']}"
-    )
     num_items = train_dataset.num_items
     max_len = int(cfg.dataset.max_len)
     model = build_model(cfg, num_items=num_items, max_len=max_len).to(device)
@@ -520,11 +476,6 @@ def main(cfg: DictConfig) -> None:
         model.parameters(),
         lr=float(cfg.training.lr),
         weight_decay=float(cfg.training.weight_decay),
-    )
-    print(
-        "Optimizer • type=AdamW "
-        f"lr={optimizer.param_groups[0]['lr']:.6e} • "
-        f"weight_decay={optimizer.param_groups[0]['weight_decay']:.3g}"
     )
     grad_clip = cfg.training.get("grad_clip")
     grad_clip_value = float(grad_clip) if grad_clip is not None else None
@@ -562,34 +513,7 @@ def main(cfg: DictConfig) -> None:
     if log_interval <= 0:
         log_interval = batches_per_epoch
 
-    debug_flags = {
-        name: cfg.training.get(name)
-        for name in (
-            "fast_dev_run",
-            "limit_train_batches",
-            "limit_val_batches",
-            "limit_test_batches",
-            "steps",
-            "max_steps",
-        )
-        if name in cfg.training
-    }
-    debug_flags = {key: value for key, value in debug_flags.items() if value not in (None, False, 0)}
-    if debug_flags:
-        print(f"Debug flags detected • {debug_flags}")
-    else:
-        print("Debug flags detected • none")
-
-    device_label = device.type if device.index is None else f"{device.type}:{device.index}"
-    print(
-        "Training • "
-        f"task=seqrec "
-        f"steps={total_steps:,} "
-        f"device={device_label} "
-        f"batch_size={cfg.training.batch_size} "
-        f"batches/epoch={batches_per_epoch} "
-        f"train_samples={len(train_dataset)}"
-    )
+    print("-" * 100)
 
     trace_path_cfg = cfg.training.get("trace_path")
     trace_path: Path | None = None
@@ -600,9 +524,9 @@ def main(cfg: DictConfig) -> None:
         trace_path = Path(to_absolute_path(str(trace_path_cfg)))
         trace_path.parent.mkdir(parents=True, exist_ok=True)
 
-    progress = ProgressReporter(total_steps)
+    progress = ProgressReporter(total_steps, style="minimal")
     last_eval: Dict[str, Dict[str, float]] = {}
-    best_ndcg = float("-inf")
+    best_hr = float("-inf")
     best_epoch = -1
     best_train_time = 0.0
     best_peak_gb = 0.0
@@ -614,6 +538,9 @@ def main(cfg: DictConfig) -> None:
     max_eval_batches: int | None = (
         int(max_eval_batches_cfg) if max_eval_batches_cfg not in (None, False, 0) else None
     )
+
+    completed_epoch_times: List[float] = []
+    avg_epoch_seconds: float | None = None
 
     for epoch in range(epochs):
         if global_step >= total_steps:
@@ -645,10 +572,6 @@ def main(cfg: DictConfig) -> None:
 
             global_step += 1
             progress.update(batch_size)
-            if global_step <= 5:
-                current_lr = optimizer.param_groups[0]["lr"]
-                print(f"LR step • step={global_step} • lr={current_lr:.6e}")
-
             if trace_path is not None and (trace_limit <= 0 or global_step <= trace_limit):
                 trace_entry = {
                     "step": global_step,
@@ -669,33 +592,20 @@ def main(cfg: DictConfig) -> None:
                 trace_records.append(trace_entry)
 
             if (b_idx % log_interval == 0) or global_step == total_steps:
-                metrics: Dict[str, float] = {}
-                if epoch_examples:
-                    metrics["Loss(epoch)"] = epoch_loss / epoch_examples
-                # Surface last seen eval metrics inline for quick monitoring
-                for split_name, metric_dict in last_eval.items():
-                    for metric_name, metric_value in metric_dict.items():
-                        metrics[f"{metric_name}({split_name})"] = metric_value
-                # Add lightweight GPU telemetry if available
-                if (
-                    device.type == "cuda" and torch.cuda.is_available() and bool(cfg.training.get("log_gpu", False))
-                ):
-                    mem_alloc = torch.cuda.memory_allocated(device) / 1e9
-                    mem_peak = torch.cuda.max_memory_allocated(device) / 1e9
-                    try:
-                        total_mem = torch.cuda.get_device_properties(device).total_memory / 1e9  # type: ignore[attr-defined]
-                    except Exception:
-                        total_mem = 0.0
-                    if total_mem > 0:
-                        metrics["GPU(alloc%)"] = 100.0 * (mem_alloc / total_mem)
-                    metrics["GPU(alloc)GB"] = mem_alloc
-                    metrics["GPU(peak)GB"] = mem_peak
-                lr = optimizer.param_groups[0]["lr"]
+                if avg_epoch_seconds is not None:
+                    avg_epoch_display = format_duration(avg_epoch_seconds)
+                elif completed_epoch_times:
+                    avg_epoch_display = format_duration(
+                        sum(completed_epoch_times) / len(completed_epoch_times)
+                    )
+                else:
+                    avg_epoch_display = "--:--:--"
+                metrics: Dict[str, str] = {"AvgEpochTime": avg_epoch_display}
+                avg_loss = epoch_loss / max(epoch_examples, 1)
                 progress.log(
                     global_step,
-                    loss_value,
+                    avg_loss,
                     metrics=metrics or None,
-                    lr=lr,
                     epoch=epoch + 1,
                     total_epochs=epochs,
                     epoch_step=b_idx,
@@ -717,7 +627,7 @@ def main(cfg: DictConfig) -> None:
                 )
                 last_eval["val"] = val_metrics
                 print(
-                    f"Eval epoch {epoch + 1:03d} • batch={b_idx}/{batches_per_epoch} • "
+                    f"Eval epoch {epoch + 1} • batch={b_idx}/{batches_per_epoch} • "
                     f"{_format_split_metrics('val', val_metrics)}"
                 )
 
@@ -739,7 +649,7 @@ def main(cfg: DictConfig) -> None:
             torch.cuda.synchronize(device)
         _val_time = time.perf_counter() - val_start
         last_eval["val"] = val_metrics
-        print(f"Eval epoch {epoch + 1:03d} • {_format_split_metrics('val', val_metrics)}")
+        print(f"Eval epoch {epoch + 1} • {_format_split_metrics('val', val_metrics)}")
         if trace_path is not None:
             trace_eval_records.append(
                 {
@@ -749,9 +659,9 @@ def main(cfg: DictConfig) -> None:
                     **{name: float(value) for name, value in val_metrics.items()},
                 }
             )
-        current_ndcg = val_metrics[f"NDCG@{topk}"]
-        if current_ndcg > best_ndcg:
-            best_ndcg = current_ndcg
+        current_hr = val_metrics[f"HR@{topk}"]
+        if current_hr > best_hr:
+            best_hr = current_hr
             best_epoch = epoch
             best_train_time = epoch_duration
             if device.type == "cuda" and torch.cuda.is_available():
@@ -760,16 +670,19 @@ def main(cfg: DictConfig) -> None:
                 best_peak_gb = 0.0
             torch.save(model.state_dict(), output_dir / "best.pt")
             print(
-                f"Checkpoint • epoch={epoch + 1:03d} "
-                f"metric=NDCG@{topk} value={current_ndcg:.4f}"
+                f"Checkpoint • epoch={epoch + 1} "
+                f"metric=HR@{topk} value={current_hr:.4f}"
             )
+
+        completed_epoch_times.append(epoch_duration)
+        avg_epoch_seconds = sum(completed_epoch_times) / len(completed_epoch_times)
 
     progress.summary()
 
     if best_epoch >= 0:
         state = torch.load(output_dir / "best.pt", map_location=device)
         model.load_state_dict(state)
-        print(f"Checkpoint • loaded_epoch={best_epoch + 1:03d}")
+        print(f"Checkpoint • loaded_epoch={best_epoch + 1}")
 
     test_start = time.perf_counter()
     test_metrics = evaluate_fullsort(
