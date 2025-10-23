@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Optional, Protocol, Tuple, cast
 
 import torch
 from torch import Tensor
@@ -11,13 +11,73 @@ from torch.autograd.function import FunctionCtx
 
 __all__ = ["try_selective_scan", "has_kernels", "extension_error"]
 
+Gradients = Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Optional[Tensor]]
+
+
+class _SelectiveScanKernels(Protocol):
+    """Protocol describing the fused selective scan kernel bindings."""
+
+    def selective_scan(
+        self,
+        inputs: Tensor,
+        dt: Tensor,
+        A: Tensor,
+        B: Tensor,
+        C: Tensor,
+        gate: Optional[Tensor],
+    ) -> Tensor:
+        ...
+
+    def selective_scan_backward(
+        self,
+        grad_output: Tensor,
+        inputs: Tensor,
+        dt: Tensor,
+        A: Tensor,
+        B: Tensor,
+        C: Tensor,
+        gate: Optional[Tensor],
+    ) -> Gradients:
+        ...
+
+    def selective_scan_cuda(
+        self,
+        inputs: Tensor,
+        dt: Tensor,
+        A: Tensor,
+        B: Tensor,
+        C: Tensor,
+        gate: Optional[Tensor],
+        chunk: int,
+    ) -> tuple[Tensor, Tensor]:
+        ...
+
+    def selective_scan_cuda_backward(
+        self,
+        grad_output: Tensor,
+        inputs: Tensor,
+        dt: Tensor,
+        A: Tensor,
+        B: Tensor,
+        C: Tensor,
+        gate: Optional[Tensor],
+        chunk_states: Tensor,
+        chunk: int,
+    ) -> Gradients:
+        ...
+
+
+_kernels: Optional[_SelectiveScanKernels]
+
+
 try:  # pragma: no cover - import surface
-    from ossm import _kernels as _kernels  # type: ignore[attr-defined]
+    from ossm import _kernels as _kernels_module  # type: ignore[attr-defined]
 except ImportError as exc:  # pragma: no cover - build-time failure surface
     _kernels = None
     _EXTENSION_ERROR: Optional[Exception] = exc
 else:
     _EXTENSION_ERROR = None
+    _kernels = cast(_SelectiveScanKernels, _kernels_module)
 
 
 def _trace(message: str) -> None:
@@ -95,11 +155,15 @@ def try_selective_scan(
         for tensor in (inputs, dt, A, B, C, gate)
     )
 
+    kernels = _kernels
+    if kernels is None:
+        return None
+
     if not requires_grad:
         if device_type == "cuda":
-            outputs, _ = _kernels.selective_scan_cuda(inputs, dt, A, B, C, gate, _DEFAULT_CHUNK)
+            outputs, _ = kernels.selective_scan_cuda(inputs, dt, A, B, C, gate, _DEFAULT_CHUNK)
             return outputs
-        return _kernels.selective_scan(inputs, dt, A, B, C, gate)
+        return kernels.selective_scan(inputs, dt, A, B, C, gate)
 
     try:
         return _SelectiveScanFn.apply(inputs, dt, A, B, C, gate, _DEFAULT_CHUNK)
@@ -145,18 +209,22 @@ class _SelectiveScanFn(torch.autograd.Function):
         C_c = C.contiguous()
 
         device_type = inputs.device.type
-        ctx.use_cuda = device_type == "cuda"
-        ctx.has_gate = gate_tensor is not None
-        ctx.chunk = chunk
+        ctx_attrs = cast("_SelectiveScanContext", ctx)
 
-        if ctx.use_cuda:
-            outputs, chunk_states = _kernels.selective_scan_cuda(
+        ctx_attrs.use_cuda = device_type == "cuda"
+        ctx_attrs.has_gate = gate_tensor is not None
+        ctx_attrs.chunk = chunk
+
+        kernels = _require_kernels()
+
+        if ctx_attrs.use_cuda:
+            outputs, chunk_states = kernels.selective_scan_cuda(
                 inputs_c, dt_c, A_c, B_c, C_c, gate_tensor, chunk
             )
             ctx.save_for_backward(inputs_c, dt_c, A_c, B_c, C_c, gate_saved, chunk_states)
             return outputs
 
-        outputs = _kernels.selective_scan(inputs_c, dt_c, A_c, B_c, C_c, gate_tensor)
+        outputs = kernels.selective_scan(inputs_c, dt_c, A_c, B_c, C_c, gate_tensor)
         ctx.save_for_backward(inputs_c, dt_c, A_c, B_c, C_c, gate_saved)
         return outputs
 
@@ -164,11 +232,14 @@ class _SelectiveScanFn(torch.autograd.Function):
     def backward(
         ctx: FunctionCtx, grad_output: Tensor
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Optional[Tensor], None]:
-        if ctx.use_cuda:
-            inputs, dt, A, B, C, gate_saved, chunk_states = ctx.saved_tensors
-            gate_opt = gate_saved if ctx.has_gate else None
+        ctx_attrs = cast("_SelectiveScanContext", ctx)
+        kernels = _require_kernels()
+
+        if ctx_attrs.use_cuda:
+            inputs, dt, A, B, C, gate_saved, chunk_states = ctx_attrs.saved_tensors
+            gate_opt = gate_saved if ctx_attrs.has_gate else None
             grad_inputs, grad_dt, grad_A, grad_B, grad_C, grad_gate = (
-                _kernels.selective_scan_cuda_backward(
+                kernels.selective_scan_cuda_backward(
                     grad_output.contiguous(),
                     inputs,
                     dt,
@@ -177,14 +248,14 @@ class _SelectiveScanFn(torch.autograd.Function):
                     C,
                     gate_opt,
                     chunk_states,
-                    ctx.chunk,
+                    ctx_attrs.chunk,
                 )
             )
         else:
-            inputs, dt, A, B, C, gate_saved = ctx.saved_tensors
-            gate_opt = gate_saved if ctx.has_gate else None
+            inputs, dt, A, B, C, gate_saved = ctx_attrs.saved_tensors
+            gate_opt = gate_saved if ctx_attrs.has_gate else None
             grad_inputs, grad_dt, grad_A, grad_B, grad_C, grad_gate = (
-                _kernels.selective_scan_backward(
+                kernels.selective_scan_backward(
                     grad_output.contiguous(),
                     inputs,
                     dt,
@@ -195,7 +266,23 @@ class _SelectiveScanFn(torch.autograd.Function):
                 )
             )
 
-        if not ctx.has_gate:
+        if not ctx_attrs.has_gate:
             grad_gate = None
 
         return grad_inputs, grad_dt, grad_A, grad_B, grad_C, grad_gate, None
+
+
+class _SelectiveScanContext(Protocol):
+    """Typed view over the ``torch.autograd.Function`` context."""
+
+    saved_tensors: tuple[Tensor, ...]
+    use_cuda: bool
+    has_gate: bool
+    chunk: int
+
+
+def _require_kernels() -> _SelectiveScanKernels:
+    kernels = _kernels
+    if kernels is None:  # pragma: no cover - defensive runtime guard
+        raise RuntimeError("Selective scan kernels are not available")
+    return kernels
