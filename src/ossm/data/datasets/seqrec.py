@@ -220,5 +220,12 @@ def collate_left_pad(samples: Iterable[Tuple[int, Sequence[int], int]], max_len:
         targets[row] = int(target)
         user_ids[row] = int(user_id)
 
+    if __debug__:
+        non_empty = mask.any(dim=1)
+        if torch.any(non_empty) and not torch.all(mask[non_empty, -1]):
+            raise AssertionError(
+                "collate_left_pad expects left padding with last valid token in the final column"
+            )
+
     return SeqRecBatch(input_ids=padded, target=targets, mask=mask, user_ids=user_ids)
 

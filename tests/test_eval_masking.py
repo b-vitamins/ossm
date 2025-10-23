@@ -26,7 +26,7 @@ class _DummyModel:
     def to(self, device: torch.device) -> "_DummyModel":  # pragma: no cover
         return self
 
-    def predict_scores(self, batch, *, include_padding: bool = False) -> torch.Tensor:
+    def predict_logits(self, batch, *, include_padding: bool = False) -> torch.Tensor:
         _ = include_padding
         return torch.tensor([[0.2, 0.6, 0.3]], device=batch.input_ids.device)
 
