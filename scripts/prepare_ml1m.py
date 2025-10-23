@@ -1,4 +1,4 @@
-"""Preprocess MovieLens-1M for sequential recommendation experiments."""
+"""Preprocess MovieLens ratings for sequential recommendation experiments."""
 
 from __future__ import annotations
 
@@ -11,6 +11,10 @@ import numpy as np
 import pandas as pd
 
 MIN_RATING = 4.0
+SUPPORTED_DATASETS = {
+    "ml-1m": "MovieLens 1M",
+    "ml-25m": "MovieLens 25M",
+}
 
 
 def _load_raw(path: Path) -> pd.DataFrame:
@@ -111,9 +115,28 @@ def _write_outputs(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Prepare MovieLens-1M for seqrec experiments")
-    parser.add_argument("--raw", type=Path, required=True, help="Path to the raw ml-1m directory")
-    parser.add_argument("--out", type=Path, required=True, help="Directory where the processed data will be stored")
+    parser = argparse.ArgumentParser(
+        description="Prepare MovieLens ratings for sequential recommendation experiments"
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        choices=sorted(SUPPORTED_DATASETS),
+        default="ml-1m",
+        help="MovieLens release to preprocess (default: ml-1m)",
+    )
+    parser.add_argument(
+        "--raw",
+        type=Path,
+        required=True,
+        help="Path to the raw MovieLens directory (e.g., ml-1m or ml-25m)",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="Directory where the processed data will be stored",
+    )
     parser.add_argument("--min-interactions", type=int, default=5, help="Minimum interactions per user")
     parser.add_argument(
         "--min-item-interactions",
@@ -137,6 +160,7 @@ def main() -> None:
     )
     _write_outputs(args.out, train_df, val_df, test_df, user_ptr, train_items, num_items)
     summary = {
+        "dataset": args.dataset,
         "users": int(user_ptr.size - 1),
         "items": int(num_items),
         "train_interactions": int(train_items.size),

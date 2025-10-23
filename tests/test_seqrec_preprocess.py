@@ -27,7 +27,8 @@ def _make_ml1m_raw(root: Path) -> None:
     df.to_csv(root / "ratings.csv", index=False)
 
 
-def test_prepare_ml1m_outputs(tmp_path: Path) -> None:
+@pytest.mark.parametrize("dataset", [None, "ml-25m"])
+def test_prepare_ml1m_outputs(tmp_path: Path, dataset: str | None) -> None:
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
     _make_ml1m_raw(raw_dir)
@@ -37,6 +38,7 @@ def test_prepare_ml1m_outputs(tmp_path: Path) -> None:
         [
             sys.executable,
             str(Path("scripts/prepare_ml1m.py")),
+            *(() if dataset is None else ("--dataset", dataset)),
             "--raw",
             str(raw_dir),
             "--out",

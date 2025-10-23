@@ -235,6 +235,16 @@ and can be reproduced on CPU (for smoke tests) or GPU (for full-scale runs).
      --out data/seqrec/ml1m \
      --min-interactions 5
 
+   # MovieLens-25M (~1 GB download, ~150 MB processed outputs)
+   wget https://files.grouplens.org/datasets/movielens/ml-25m.zip
+   unzip ml-25m.zip -d data/raw/ml-25m
+   python scripts/prepare_ml1m.py \
+     --dataset ml-25m \
+     --raw data/raw/ml-25m/ml-25m \
+     --out data/seqrec/ml25m \
+     --min-interactions 5 \
+     --min-item-interactions 5
+
    # Amazon category dumps (Beauty & Video Games)
    mkdir -p data/raw/amazon
    wget http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Beauty_5.json.gz \
@@ -275,6 +285,10 @@ and can be reproduced on CPU (for smoke tests) or GPU (for full-scale runs).
    The progress reporter prints step-level loss, throughput, validation ranking
    metrics (HR@10/NDCG@10/MRR@10), and a final summary that mirrors the
    classification telemetry style.
+
+   Swap `--dataset-name` (and the corresponding validation/test defaults) to
+   `ml25m` to run on the MovieLens-25M split after preprocessing it with the
+   helper script above.
 
 3. **Aggregate metrics into publication-style tables**
 
