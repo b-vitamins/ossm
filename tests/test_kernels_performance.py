@@ -5,6 +5,7 @@ from typing import Any, Callable, Optional, Tuple, cast
 
 import pytest
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 from torch.utils import benchmark
 
@@ -14,6 +15,11 @@ from ossm.models._linoss_scan import try_run_scan as _linoss_try_run_scan
 from ossm.models._lru_scan import try_run_lru_scan
 from ossm.models._rnn_scan import try_run_linear_rnn_scan
 from ossm.models._s5_scan import try_run_s5_scan
+from ossm.models._selective_scan import (
+    has_kernels as _selective_has_kernels,
+    try_selective_scan as _try_selective_scan,
+)
+from ossm.models.mambarec import _selective_scan_discretized
 from ossm.models.dlinoss import DampedLinOSSLayer
 
 
@@ -41,6 +47,7 @@ _CPU_SPEEDUPS = {
     "s5": 5.4,
     # Linear RNN CPU improvements are more modest but still significant.
     "rnn": 1.6,
+    "selective": 3.2,
 }
 
 _CUDA_SPEEDUPS = {
@@ -49,9 +56,18 @@ _CUDA_SPEEDUPS = {
     "lru": 3.0,
     "s5": 3.0,
     "rnn": 3.5,
+    "selective": 6.0,
 }
 
 _SPEEDUP_TOLERANCE = 0.15
+
+
+def _selective_cuda_available() -> bool:
+    try:
+        from ossm import _kernels as kernels  # type: ignore[attr-defined]
+    except ImportError:
+        return False
+    return hasattr(kernels, "selective_scan_cuda") and hasattr(kernels, "selective_scan_cuda_backward")
 
 
 @dataclass(frozen=True)
@@ -132,6 +148,56 @@ def _linear_rnn_naive(
         state = state.matmul(weight_hh_t) + base
         outputs.append(state)
     return torch.stack(outputs, dim=0)
+
+
+def _setup_selective_case(
+    batch: int,
+    channels: int,
+    length: int,
+    state_dim: int,
+) -> Callable[[torch.device], Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]]:
+    def _inner(
+        device: torch.device,
+    ) -> Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]:
+        if device.type == "cpu":
+            if not _selective_has_kernels():
+                return None, None, "Selective scan kernel is unavailable"
+        elif device.type == "cuda":
+            if not torch.cuda.is_available():  # pragma: no cover - defensive guard
+                return None, None, "CUDA unavailable"
+            if not _selective_cuda_available():
+                return None, None, "Selective scan CUDA kernel is unavailable"
+        else:  # pragma: no cover - unsupported device guard
+            return None, None, f"Unsupported device type: {device.type}"
+
+        torch.manual_seed(0)
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(0)
+
+        inputs = torch.randn(batch, channels, length, dtype=torch.float32, device=device)
+        dt = torch.rand(batch, channels, length, dtype=torch.float32, device=device) * 0.05
+        A = -torch.exp(torch.randn(channels, state_dim, dtype=torch.float32, device=device))
+        B = torch.randn(batch, length, state_dim, dtype=torch.float32, device=device)
+        C = torch.randn(batch, length, state_dim, dtype=torch.float32, device=device)
+        gate = torch.randn(batch, channels, length, dtype=torch.float32, device=device)
+
+        fused = _try_selective_scan(inputs, dt, A, B, C, gate)
+        if fused is None:
+            return None, None, "Selective scan kernel unavailable"
+
+        def run_extension() -> Tensor:
+            result = _try_selective_scan(inputs, dt, A, B, C, gate)
+            if result is None:
+                raise RuntimeError("Selective scan kernel unavailable during benchmark")
+            return cast(Tensor, result)
+
+        def run_reference() -> Tensor:
+            baseline = _selective_scan_discretized(inputs=inputs, dt=dt, A=A, B_t=B, C_t=C)
+            return baseline * F.silu(gate)
+
+        return run_extension, run_reference, None
+
+    return _inner
 
 
 def _setup_linoss_case(length: int, batch: int, ssm: int) -> Callable[[torch.device], Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]]:
@@ -333,6 +399,13 @@ _CPU_CASES = [
         min_runtime=0.35,
         threshold=_CPU_SPEEDUPS["rnn"],
     ),
+    BenchmarkCase(
+        name="selective",
+        device_type="cpu",
+        setup=_setup_selective_case(batch=8, channels=128, length=512, state_dim=64),
+        min_runtime=0.35,
+        threshold=_CPU_SPEEDUPS["selective"],
+    ),
 ]
 
 
@@ -387,6 +460,14 @@ _CUDA_CASES = [
         setup=_setup_rnn_case(length=2048, batch=24, input_dim=256, hidden_dim=256),
         min_runtime=0.6,
         threshold=_CUDA_SPEEDUPS["rnn"],
+        synchronize=True,
+    ),
+    BenchmarkCase(
+        name="selective",
+        device_type="cuda",
+        setup=_setup_selective_case(batch=8, channels=128, length=512, state_dim=64),
+        min_runtime=0.6,
+        threshold=_CUDA_SPEEDUPS["selective"],
         synchronize=True,
     ),
 ]

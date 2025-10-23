@@ -45,6 +45,15 @@ sources = cpp_sources + (cuda_sources if use_cuda else [])
 extension_cls = CUDAExtension if use_cuda else CppExtension
 
 extra_compile_args = {"cxx": ["-O3", "-std=c++17", "-march=native"]}
+extra_link_args: list[str] = []
+
+if os.name == "nt":
+    extra_compile_args["cxx"].extend(["/fp:fast", "/openmp"])
+else:
+    extra_compile_args["cxx"].extend(
+        ["-ffast-math", "-fno-math-errno", "-fno-trapping-math", "-fopenmp"]
+    )
+    extra_link_args.append("-fopenmp")
 
 if use_cuda:
     nvcc_flags = [
@@ -74,6 +83,9 @@ extension_kwargs = dict(
     include_dirs=[_relative_posix(src_dir)],
     extra_compile_args=extra_compile_args,
 )
+
+if extra_link_args:
+    extension_kwargs["extra_link_args"] = extra_link_args
 
 if use_cuda:
     extension_kwargs.setdefault("define_macros", []).append(("WITH_CUDA", None))

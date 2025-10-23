@@ -1,9 +1,11 @@
 #include <torch/extension.h>
 
+namespace py = pybind11;
+
 namespace ossm {
 torch::Tensor linoss_scan(const at::Tensor& m11,
-                           const at::Tensor& m12,
-                           const at::Tensor& m21,
+                          const at::Tensor& m12,
+                          const at::Tensor& m21,
                            const at::Tensor& m22,
                            const at::Tensor& b_seq);
 
@@ -32,6 +34,41 @@ at::Tensor linear_rnn_scan(const at::Tensor& weight_hh,
 at::Tensor s5_scan(const at::Tensor& lambda_real,
                    const at::Tensor& lambda_imag,
                    const at::Tensor& b_seq);
+
+at::Tensor selective_scan_cpu(const at::Tensor& inputs,
+                              const at::Tensor& dt,
+                              const at::Tensor& A,
+                              const at::Tensor& B,
+                              const at::Tensor& C,
+                              const c10::optional<at::Tensor>& gate);
+
+std::vector<at::Tensor> selective_scan_cpu_backward(const at::Tensor& grad_output,
+                                                    const at::Tensor& inputs,
+                                                    const at::Tensor& dt,
+                                                    const at::Tensor& A,
+                                                    const at::Tensor& B,
+                                                    const at::Tensor& C,
+                                                    const c10::optional<at::Tensor>& gate);
+
+#ifdef WITH_CUDA
+std::vector<at::Tensor> selective_scan_cuda_forward(const at::Tensor& inputs,
+                                                    const at::Tensor& dt,
+                                                    const at::Tensor& A,
+                                                    const at::Tensor& B,
+                                                    const at::Tensor& C,
+                                                    const c10::optional<at::Tensor>& gate,
+                                                    int64_t chunk_length);
+
+std::vector<at::Tensor> selective_scan_cuda_backward(const at::Tensor& grad_output,
+                                                     const at::Tensor& inputs,
+                                                     const at::Tensor& dt,
+                                                     const at::Tensor& A,
+                                                     const at::Tensor& B,
+                                                     const at::Tensor& C,
+                                                     const c10::optional<at::Tensor>& gate,
+                                                     const at::Tensor& chunk_states,
+                                                     int64_t chunk_length);
+#endif
 }  // namespace ossm
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -41,4 +78,47 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("lru_scan", &ossm::lru_scan, "LRU associative scan kernel");
   m.def("linear_rnn_scan", &ossm::linear_rnn_scan, "Linear RNN scan kernel");
   m.def("s5_scan", &ossm::s5_scan, "S5 associative scan kernel");
+  m.def("selective_scan",
+        &ossm::selective_scan_cpu,
+        "Fused selective scan with SiLU gate (CPU)",
+        py::arg("inputs"),
+        py::arg("dt"),
+        py::arg("A"),
+        py::arg("B"),
+        py::arg("C"),
+        py::arg("gate") = py::none());
+  m.def("selective_scan_backward",
+        &ossm::selective_scan_cpu_backward,
+        "Backward pass for fused selective scan (CPU)",
+        py::arg("grad_output"),
+        py::arg("inputs"),
+        py::arg("dt"),
+        py::arg("A"),
+        py::arg("B"),
+        py::arg("C"),
+        py::arg("gate") = py::none());
+#ifdef WITH_CUDA
+  m.def("selective_scan_cuda",
+        &ossm::selective_scan_cuda_forward,
+        "Fused selective scan with SiLU gate (CUDA)",
+        py::arg("inputs"),
+        py::arg("dt"),
+        py::arg("A"),
+        py::arg("B"),
+        py::arg("C"),
+        py::arg("gate") = py::none(),
+        py::arg("chunk_length") = 16);
+  m.def("selective_scan_cuda_backward",
+        &ossm::selective_scan_cuda_backward,
+        "Backward pass for fused selective scan (CUDA)",
+        py::arg("grad_output"),
+        py::arg("inputs"),
+        py::arg("dt"),
+        py::arg("A"),
+        py::arg("B"),
+        py::arg("C"),
+        py::arg("gate") = py::none(),
+        py::arg("chunk_states"),
+        py::arg("chunk_length"));
+#endif
 }
