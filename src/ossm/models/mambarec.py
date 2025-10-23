@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn import ModuleList
 
+from ._selective_scan import try_selective_scan as _try_selective_scan
 from .dlinossrec import ItemEmbeddingEncoder
 from .heads import TiedSoftmaxHead
 
@@ -66,19 +67,17 @@ def _selective_scan_discretized(
     outputs: list[torch.Tensor] = []
 
     # Broadcast helpers.
-    A_bc = A_matrix.unsqueeze(0).unsqueeze(2)  # (1, channels, 1, state)
-
     for timestep in range(seqlen):
         dt_t = dt[:, :, timestep].unsqueeze(-1)  # (batch, channels, 1)
         u_t = u[:, :, timestep].unsqueeze(-1)  # (batch, channels, 1)
         B_step = B_proj[:, timestep, :].unsqueeze(1)  # (batch, 1, state)
         C_step = C_proj[:, timestep, :]  # (batch, state)
 
-        dA = dt_t * A_bc  # (batch, channels, 1, state)
-        A_bar = torch.exp(dA)  # (batch, channels, 1, state)
-        phi = _safe_expm1(dA) / A_bc  # (batch, channels, 1, state)
+        dA = dt_t * A_matrix  # (batch, channels, state)
+        A_bar = torch.exp(dA)
+        phi = _safe_expm1(dA) / A_matrix
 
-        state = (A_bar.squeeze(2) * state) + (phi.squeeze(2) * B_step) * u_t
+        state = (A_bar * state) + (phi * B_step) * u_t
         y_t = torch.einsum("bcn,bn->bc", state, C_step)
         outputs.append(y_t)
 
@@ -179,15 +178,31 @@ class _MambaMixer(nn.Module):
         dt_raw, B_gen, C_gen = torch.split(proj, [self.dt_rank, self.d_state, self.d_state], dim=-1)
         dt = F.softplus(self.dt_proj(dt_raw))
 
-        outputs = _selective_scan_discretized(
+        dt_proj = dt.transpose(1, 2)
+        A_param = -torch.exp(self.A_log.float())
+        gate = z.transpose(1, 2)
+
+        fused = _try_selective_scan(
             inputs=x_conv,
-            dt=dt.transpose(1, 2),
-            A=-torch.exp(self.A_log.float()),
-            B_t=B_gen,
-            C_t=C_gen,
+            dt=dt_proj,
+            A=A_param,
+            B=B_gen,
+            C=C_gen,
+            gate=gate,
         )
 
-        gated = outputs * F.silu(z.transpose(1, 2))
+        if fused is None:
+            outputs = _selective_scan_discretized(
+                inputs=x_conv,
+                dt=dt_proj,
+                A=A_param,
+                B_t=B_gen,
+                C_t=C_gen,
+            )
+            gated = outputs * F.silu(gate)
+        else:
+            gated = fused
+
         return self.out_proj(gated.transpose(1, 2))
 
 

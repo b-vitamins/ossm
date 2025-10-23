@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import pytest
 import torch
+import torch.nn.functional as F
 from unittest import mock
 
 from ossm.models.lru import _LRUScanFn
 from ossm.models.rnn import _LinearRNNScanFn
 from ossm.models.s5 import _S5ScanFn
+from ossm.models._selective_scan import (
+    has_kernels as _selective_has_kernels,
+    try_selective_scan as _try_selective_scan,
+)
+from ossm.models.mambarec import _selective_scan_discretized
 
 
 def _has_kernel(attr: str) -> bool:
@@ -52,6 +58,129 @@ def _sum_real_and_imag(out: torch.Tensor) -> torch.Tensor:
 
 def _sum_all(out: torch.Tensor) -> torch.Tensor:
     return out.sum()
+
+
+@pytest.mark.skipif(not _selective_has_kernels(), reason="Selective scan kernel unavailable")
+def test_selective_scan_kernel_matches_reference() -> None:
+    torch.manual_seed(0)
+
+    batch, channels, length, state = 4, 96, 384, 64
+    inputs = torch.randn(batch, channels, length, dtype=torch.float32)
+    dt = torch.rand(batch, channels, length, dtype=torch.float32) * 0.05
+    A = -torch.exp(torch.randn(channels, state, dtype=torch.float32))
+    B = torch.randn(batch, length, state, dtype=torch.float32)
+    C = torch.randn(batch, length, state, dtype=torch.float32)
+    gate = torch.randn(batch, channels, length, dtype=torch.float32)
+
+    fused = _try_selective_scan(inputs, dt, A, B, C, gate)
+    assert fused is not None
+
+    reference = _selective_scan_discretized(inputs=inputs, dt=dt, A=A, B_t=B, C_t=C)
+    reference = reference * F.silu(gate)
+
+    torch.testing.assert_close(fused, reference, rtol=1e-4, atol=5e-5)
+
+
+@pytest.mark.skipif(not _selective_has_kernels(), reason="Selective scan kernel unavailable")
+def test_selective_scan_kernel_backward_matches_reference() -> None:
+    torch.manual_seed(0)
+
+    batch, channels, length, state = 2, 48, 192, 32
+    inputs = torch.randn(batch, channels, length, dtype=torch.float32)
+    inputs.requires_grad_()
+    dt = torch.rand(batch, channels, length, dtype=torch.float32) * 0.05
+    dt.requires_grad_()
+    A = -torch.exp(torch.randn(channels, state, dtype=torch.float32))
+    A.requires_grad_()
+    B = torch.randn(batch, length, state, dtype=torch.float32)
+    B.requires_grad_()
+    C = torch.randn(batch, length, state, dtype=torch.float32)
+    C.requires_grad_()
+    gate = torch.randn(batch, channels, length, dtype=torch.float32)
+    gate.requires_grad_()
+
+    fused = _try_selective_scan(inputs, dt, A, B, C, gate)
+    assert fused is not None
+
+    loss = fused.square().mean()
+    loss.backward()
+
+    grads_fused = [
+        inputs.grad.detach().clone(),
+        dt.grad.detach().clone(),
+        A.grad.detach().clone(),
+        B.grad.detach().clone(),
+        C.grad.detach().clone(),
+        gate.grad.detach().clone(),
+    ]
+
+    for tensor in (inputs, dt, A, B, C, gate):
+        tensor.grad.zero_()
+
+    reference = _selective_scan_discretized(inputs=inputs, dt=dt, A=A, B_t=B, C_t=C)
+    reference = reference * F.silu(gate)
+    ref_loss = reference.square().mean()
+    ref_loss.backward()
+
+    grads_reference = [
+        inputs.grad.detach().clone(),
+        dt.grad.detach().clone(),
+        A.grad.detach().clone(),
+        B.grad.detach().clone(),
+        C.grad.detach().clone(),
+        gate.grad.detach().clone(),
+    ]
+
+    for grad_fast, grad_ref in zip(grads_fused, grads_reference):
+        torch.testing.assert_close(grad_fast, grad_ref, rtol=1e-4, atol=5e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.skipif(not _has_kernel("selective_scan_cuda"), reason="Selective scan CUDA kernel unavailable")
+def test_selective_scan_kernel_matches_reference_cuda() -> None:
+    torch.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
+
+    device = torch.device("cuda")
+    batch, channels, length, state = 2, 32, 256, 32
+
+    inputs = torch.randn(batch, channels, length, dtype=torch.float32, device=device)
+    inputs.requires_grad_()
+    dt = torch.rand(batch, channels, length, dtype=torch.float32, device=device) * 0.05
+    dt.requires_grad_()
+    A = -torch.exp(torch.randn(channels, state, dtype=torch.float32, device=device))
+    A.requires_grad_()
+    B = torch.randn(batch, length, state, dtype=torch.float32, device=device)
+    B.requires_grad_()
+    C = torch.randn(batch, length, state, dtype=torch.float32, device=device)
+    C.requires_grad_()
+    gate = torch.randn(batch, channels, length, dtype=torch.float32, device=device)
+    gate.requires_grad_()
+
+    fused = _try_selective_scan(inputs, dt, A, B, C, gate)
+    assert fused is not None
+
+    reference = _selective_scan_discretized(inputs=inputs, dt=dt, A=A, B_t=B, C_t=C)
+    reference = reference * F.silu(gate)
+    torch.testing.assert_close(fused, reference, rtol=2e-4, atol=1e-4)
+
+    loss = fused.square().mean()
+    loss.backward()
+    grads_fused = [
+        tensor.grad.detach().clone() for tensor in (inputs, dt, A, B, C, gate)
+    ]
+
+    for tensor in (inputs, dt, A, B, C, gate):
+        tensor.grad.zero_()
+
+    ref_loss = reference.square().mean()
+    ref_loss.backward()
+    grads_reference = [
+        tensor.grad.detach().clone() for tensor in (inputs, dt, A, B, C, gate)
+    ]
+
+    for grad_fast, grad_ref in zip(grads_fused, grads_reference):
+        torch.testing.assert_close(grad_fast, grad_ref, rtol=2e-4, atol=1e-4)
 
 
 REFERENCE_COMPLEX_LAMBDA = torch.tensor(
