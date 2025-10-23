@@ -526,10 +526,10 @@ def main(cfg: DictConfig) -> None:
 
     progress = ProgressReporter(total_steps, style="minimal")
     last_eval: Dict[str, Dict[str, float]] = {}
+    topk = int(cfg.training.topk)
     tracked_checkpoint_metrics = [f"HR@{topk}", f"NDCG@{topk}", f"MRR@{topk}"]
     best_checkpoints: Dict[str, Dict[str, Any]] = {}
     global_step = 0
-    topk = int(cfg.training.topk)
     eval_interval_cfg = cfg.training.get("eval_interval")
     eval_interval: int | None = int(eval_interval_cfg) if eval_interval_cfg not in (None, False, 0) else None
     max_eval_batches_cfg = cfg.training.get("limit_val_batches")
@@ -598,7 +598,7 @@ def main(cfg: DictConfig) -> None:
                     )
                 else:
                     avg_epoch_display = "--:--:--"
-                metrics: Dict[str, str] = {"AvgEpochTime": avg_epoch_display}
+                metrics: Dict[str, object] = {"AvgEpochTime": avg_epoch_display}
                 avg_loss = epoch_loss / max(epoch_examples, 1)
                 progress.log(
                     global_step,
