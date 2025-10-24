@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import Dataset
 
 from . import utils  # keep module import so monkeypatch works
-from ..transforms.compose import Compose
+from ..transforms.compose import Compose, TimeSeriesSample
 from ..transforms.path import AddTime, NormalizeTime
 from ..transforms.cde import ToCubicSplineCoeffs
 from ..transforms.signature import ToWindowedLogSignature
@@ -138,17 +138,18 @@ class UEA(Dataset):
 
         self.split = self._target_split
 
-        self.transform = self._build_pipeline(self.view)
+        self.transform: Compose[TimeSeriesSample] = self._build_pipeline(self.view)
 
-    def _build_pipeline(self, view: str) -> Compose:
+    def _build_pipeline(self, view: str) -> Compose[TimeSeriesSample]:
+        transforms: List[Callable[[TimeSeriesSample], TimeSeriesSample]]
         if view == "raw":
-            tfms = [AddTime(), NormalizeTime()]
+            transforms = [AddTime(), NormalizeTime()]
         elif view == "coeff":
-            tfms = [AddTime(), NormalizeTime(), ToCubicSplineCoeffs()]
+            transforms = [AddTime(), NormalizeTime(), ToCubicSplineCoeffs()]
         elif view == "path":
             # Let torchsignature do the windowing; don't pre-segment here.
             basis = self.basis if self.depth == 2 else "lyndon"
-            tfms = [
+            transforms = [
                 AddTime(),
                 NormalizeTime(),
                 ToWindowedLogSignature(
@@ -159,16 +160,16 @@ class UEA(Dataset):
             ]
         else:
             raise ValueError(f"Unknown view '{view}'. Expected 'raw'|'coeff'|'path'.")
-        return Compose(tfms)
+        return Compose(transforms)
 
     def __len__(self) -> int:
         return self.values.shape[0]
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> TimeSeriesSample:
         t = self.times[idx]  # (T,)
         x = self.values[idx]  # (T, C)
         y = self.labels[idx]  # ()
-        sample = {"times": t, "values": x, "label": y}
+        sample: TimeSeriesSample = {"times": t, "values": x, "label": y}
         if self.record_grid:
             sample["grid"] = t.clone()
         if self.record_source:

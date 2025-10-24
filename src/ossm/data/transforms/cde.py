@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from typing import Dict
+from typing import cast
 
 import torch
 import torchcde
 
+from .compose import TimeSeriesSample
 
-def _ensure_time_series(sample: Dict[str, torch.Tensor]) -> None:
-    if "times" not in sample or "values" not in sample:
+
+def _ensure_time_series(sample: TimeSeriesSample) -> tuple[torch.Tensor, torch.Tensor]:
+    times = sample.get("times")
+    values = sample.get("values")
+    if times is None or values is None:
         raise KeyError("sample must contain 'times' and 'values'")
-    times = sample["times"]
-    values = sample["values"]
     if times.ndim != 1:
         raise ValueError("times must be one-dimensional")
     if values.shape[0] != times.shape[0]:
@@ -19,23 +21,26 @@ def _ensure_time_series(sample: Dict[str, torch.Tensor]) -> None:
         raise ValueError("at least two time points are required")
     if not torch.all(times[1:] > times[:-1]):
         raise ValueError("times must be strictly increasing")
+    return times, values
 
 
 class ToCubicSplineCoeffs:
     """Annotate samples with torchcde-native natural cubic coefficients."""
 
-    def __call__(self, sample: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        _ensure_time_series(sample)
-        times = sample["times"].to(dtype=torch.float32)
-        values = sample["values"].to(dtype=torch.float32)
+    def __call__(self, sample: TimeSeriesSample) -> TimeSeriesSample:
+        times, values = _ensure_time_series(sample)
+        times = times.to(dtype=torch.float32)
+        values = values.to(dtype=torch.float32)
 
         if values.ndim == 1:
             values = values.unsqueeze(-1)
 
         coeffs = torchcde.natural_cubic_coeffs(values.unsqueeze(0), t=times)
-        sample["coeffs"] = coeffs.squeeze(0)
-        sample.setdefault("initial", values[0])
-        return sample
+        updated = sample.copy()
+        updated["coeffs"] = coeffs.squeeze(0)
+        if "initial" not in updated:
+            updated["initial"] = values[0]
+        return cast(TimeSeriesSample, updated)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
