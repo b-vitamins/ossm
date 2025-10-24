@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import pickle
 from pathlib import Path
 from typing import Any, Optional
 
@@ -42,7 +43,7 @@ def maybe_save_cache(
     path = cache_dir / f"{key}.pt"
     try:
         torch.save(obj, path)
-    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError, pickle.PickleError) as exc:
         log.debug("Failed to save cache file %s: %s", path, exc, exc_info=True)
         try:
             path.unlink(missing_ok=True)
