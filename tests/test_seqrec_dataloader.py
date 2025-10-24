@@ -36,6 +36,23 @@ def test_collate_left_pad(tmp_path: Path) -> None:
     assert batch.target.shape == (2,)
     assert batch.mask[0].sum() == len(sample0[1])
 
+    contexts = [sample0[1], sample1[1]]
+    expected_inputs = []
+    expected_mask = []
+    for context in contexts:
+        trimmed = context[-5:]
+        pad = [0] * (5 - len(trimmed))
+        expected_inputs.append(pad + trimmed)
+        expected_mask.append([0] * len(pad) + [1] * len(trimmed))
+
+    expected_inputs_tensor = torch.tensor(
+        expected_inputs, dtype=batch.input_ids.dtype
+    )
+    expected_mask_tensor = torch.tensor(expected_mask, dtype=torch.bool)
+
+    assert torch.equal(batch.input_ids.cpu(), expected_inputs_tensor)
+    assert torch.equal(batch.mask.cpu(), expected_mask_tensor)
+
 
 def test_eval_dataset_context(tmp_path: Path) -> None:
     pytest.importorskip("pyarrow")
@@ -56,6 +73,8 @@ def test_collate_left_pad_pin_memory_behavior() -> None:
     batch = collate_left_pad(samples, max_len=4, pin_memory=True, dtype=torch.int16)
 
     assert batch.input_ids.dtype == torch.int16
+    assert batch.target.dtype == torch.long
+    assert batch.user_ids.dtype == torch.long
 
     if torch.cuda.is_available():
         assert batch.input_ids.is_pinned()
@@ -74,6 +93,20 @@ def test_collate_left_pad_pin_memory_behavior() -> None:
     )
     assert torch.equal(batch.input_ids.cpu(), expected_inputs)
     assert torch.equal(batch.mask.cpu(), expected_mask)
+
+
+def test_collate_left_pad_no_pin_memory_even_if_available() -> None:
+    samples = [
+        (0, [1, 2], 3),
+        (1, [4, 5, 6], 7),
+    ]
+
+    batch = collate_left_pad(samples, max_len=4, pin_memory=False)
+
+    assert not batch.input_ids.is_pinned()
+    assert not batch.mask.is_pinned()
+    assert not batch.target.is_pinned()
+    assert not batch.user_ids.is_pinned()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
