@@ -126,6 +126,9 @@ def _windowed_hall_logsignature(x: Tensor, steps: int) -> Tensor:
     return out
 
 
+from .compose import TimeSeriesSample
+
+
 class ToWindowedLogSignature:
     def __init__(self, depth: int, steps: int, basis: str = "lyndon"):
         if steps <= 0:
@@ -134,23 +137,26 @@ class ToWindowedLogSignature:
         self.steps = int(steps)
         self.basis = str(basis)
 
-    def __call__(self, sample):
+    def __call__(self, sample: TimeSeriesSample) -> TimeSeriesSample:
         # Be graceful if optional dependency isn't available; unit tests will
         # independently validate the transform when torchsignature is installed.
         try:
             fn = _require_torchsignature()
         except RuntimeError:
             return sample
-        x = sample["values"]
+        values = sample.get("values")
+        if values is None:
+            raise KeyError("sample must contain 'values'")
         basis = self.basis.lower()
         if basis == "hall":
             if self.depth != 2:
                 raise NotImplementedError("Hall projection currently supports depth==2")
-            feats = _windowed_hall_logsignature(x, self.steps)
+            feats = _windowed_hall_logsignature(values, self.steps)
         else:
-            feats = fn(x, stepsize=self.steps, depth=self.depth, basis=self.basis)
-        sample["features"] = feats
-        return sample
+            feats = fn(values, stepsize=self.steps, depth=self.depth, basis=self.basis)
+        updated = sample.copy()
+        updated["features"] = feats
+        return cast(TimeSeriesSample, updated)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(depth={self.depth}, steps={self.steps}, basis={self.basis!r})"
