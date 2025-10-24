@@ -17,6 +17,28 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle guard
 __all__ = ["ItemEmbeddingEncoder", "Dlinoss4Rec"]
 
 
+def _last_mask_index(mask: torch.Tensor) -> torch.LongTensor:
+    """Return the final valid timestep for each sequence in ``mask``.
+
+    The mask is expected to mark valid (non-padding) positions with truthy
+    values. Fully padded sequences default to index ``0`` so callers can safely
+    gather without branching.
+    """
+
+    if mask.ndim != 2:
+        raise ValueError("Mask must have shape (batch, length)")
+
+    batch, seq_len = mask.shape
+    if seq_len == 0:
+        return torch.zeros(batch, dtype=torch.long, device=mask.device)
+
+    mask_bool = mask.to(dtype=torch.bool)
+    positions = torch.arange(seq_len, device=mask.device, dtype=torch.long).unsqueeze(0)
+    masked_positions = torch.where(mask_bool, positions, positions.new_full((1, seq_len), -1))
+    last_index = masked_positions.max(dim=1).values
+    return last_index.clamp(min=0)
+
+
 class ItemEmbeddingEncoder(nn.Module):
     """Encode item identifiers with optional positional context."""
 
@@ -141,10 +163,7 @@ class Dlinoss4Rec(nn.Module):
         else:
             for block, ffn in zip(self.blocks, self.pffn_blocks):
                 features = ffn(block(features))
-        seq_len = mask.size(1)
-        positions = torch.arange(seq_len, device=mask.device, dtype=torch.long).unsqueeze(0)
-        mask_indices = mask.to(dtype=positions.dtype)
-        last_index = (positions * mask_indices).amax(dim=1)
+        last_index = _last_mask_index(mask).to(device=features.device)
         batch_indices = torch.arange(features.size(0), device=features.device)
         return features[batch_indices, last_index]
 
