@@ -27,9 +27,12 @@ def pad_collate(batch: Sequence[TimeSeriesSample]) -> TimeSeriesSample:
     times_template = batch[0].get("times")
     if channels is None or times_template is None:
         raise KeyError("pad_collate requires 'values' and 'times'")
-    values = torch.zeros(batch_size, Tm, channels.size(-1), dtype=channels.dtype)
-    times = torch.zeros(batch_size, Tm, dtype=times_template.dtype)
-    mask = torch.zeros(batch_size, Tm, dtype=torch.bool)
+
+    values = channels.new_zeros((batch_size, Tm, channels.size(-1)))
+    times = times_template.new_zeros((batch_size, Tm))
+    mask = torch.zeros(
+        batch_size, Tm, dtype=torch.bool, device=channels.device
+    )
     labels = []
     for i, sample in enumerate(batch):
         values_tensor = sample.get("values")
@@ -72,15 +75,14 @@ def path_collate(batch: Sequence[TimeSeriesSample]) -> TimeSeriesSample:
         raise KeyError("path_collate requires 'features'")
     feature_dim = first_features.size(-1)
 
-    logsig = torch.zeros(batch_size, segments_max, feature_dim, dtype=first_features.dtype)
+    logsig = first_features.new_zeros((batch_size, segments_max, feature_dim))
     first_values = batch[0].get("values")
     if first_values is not None:
         init_dim = first_values.size(-1)
-        init_dtype = first_values.dtype
+        initials = first_values.new_zeros((batch_size, init_dim))
     else:
         init_dim = feature_dim
-        init_dtype = first_features.dtype
-    initials = torch.zeros(batch_size, init_dim, dtype=init_dtype)
+        initials = first_features.new_zeros((batch_size, init_dim))
     labels = []
     for i, sample in enumerate(batch):
         features = sample.get("features")
@@ -99,7 +101,13 @@ def path_collate(batch: Sequence[TimeSeriesSample]) -> TimeSeriesSample:
         time_dtype = times_template.dtype
     else:
         time_dtype = first_features.dtype
-    times = torch.linspace(0.0, 1.0, segments_max + 1, dtype=time_dtype)
+    times = torch.linspace(
+        0.0,
+        1.0,
+        segments_max + 1,
+        dtype=time_dtype,
+        device=first_features.device,
+    )
 
     return cast(
         TimeSeriesSample,

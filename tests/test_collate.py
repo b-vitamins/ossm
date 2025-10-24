@@ -1,6 +1,9 @@
 from __future__ import annotations
+
+import pytest
 import torch
-from ossm.data.datasets.collate import pad_collate, path_collate, coeff_collate
+
+from ossm.data.datasets.collate import coeff_collate, pad_collate, path_collate
 
 
 def test_pad_collate_shapes():
@@ -21,6 +24,45 @@ def test_pad_collate_shapes():
     assert out["mask"].dtype == torch.bool
 
 
+def test_pad_collate_preserves_dtype():
+    b = [
+        {
+            "values": torch.randn(2, 2, dtype=torch.float16),
+            "times": torch.linspace(0, 1, 2, dtype=torch.float64),
+            "label": torch.tensor(0),
+        },
+        {
+            "values": torch.randn(3, 2, dtype=torch.float16),
+            "times": torch.linspace(0, 1, 3, dtype=torch.float64),
+            "label": torch.tensor(1),
+        },
+    ]
+    out = pad_collate(b)
+    assert out["values"].dtype == torch.float16
+    assert out["times"].dtype == torch.float64
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_pad_collate_cuda_device():
+    device = torch.device("cuda")
+    b = [
+        {
+            "values": torch.randn(2, 2, device=device),
+            "times": torch.linspace(0, 1, 2, device=device),
+            "label": torch.tensor(0, device=device),
+        },
+        {
+            "values": torch.randn(3, 2, device=device),
+            "times": torch.linspace(0, 1, 3, device=device),
+            "label": torch.tensor(1, device=device),
+        },
+    ]
+    out = pad_collate(b)
+    assert out["values"].device == device
+    assert out["times"].device == device
+    assert out["mask"].device == device
+
+
 def test_path_collate_shapes():
     b = [
         {"features": torch.randn(4, 16), "label": torch.tensor(0)},
@@ -28,6 +70,24 @@ def test_path_collate_shapes():
     ]
     out = path_collate(b)
     assert out["features"].shape == (2, 6, 16)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_path_collate_cuda_device():
+    device = torch.device("cuda")
+    b = [
+        {
+            "features": torch.randn(4, 16, device=device),
+            "label": torch.tensor(0, device=device),
+        },
+        {
+            "features": torch.randn(6, 16, device=device),
+            "label": torch.tensor(1, device=device),
+        },
+    ]
+    out = path_collate(b)
+    assert out["features"].device == device
+    assert out["times"].device == device
 
 
 def test_coeff_collate_shapes():

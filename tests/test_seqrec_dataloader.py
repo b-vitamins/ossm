@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import torch
+
 from ossm.data.datasets.seqrec import SeqRecEvalDataset, SeqRecTrainDataset, collate_left_pad
 
 pytest.importorskip("pyarrow")
@@ -35,6 +37,42 @@ def test_collate_left_pad(tmp_path: Path) -> None:
     assert batch.mask.shape == (2, 5)
     assert batch.target.shape == (2,)
     assert batch.mask[0].sum() == len(sample0[1])
+
+
+def test_collate_left_pad_pin_memory(tmp_path: Path) -> None:
+    _create_seqrec_dataset(tmp_path)
+    train_dataset = SeqRecTrainDataset(tmp_path, max_len=5)
+    sample0 = train_dataset[0]
+    sample1 = train_dataset[1]
+    batch = collate_left_pad([sample0, sample1], max_len=5, pin_memory=True)
+    assert batch.input_ids.is_pinned()
+    assert batch.target.is_pinned()
+    assert batch.user_ids.is_pinned()
+    assert batch.mask.is_pinned()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_collate_left_pad_cuda(tmp_path: Path) -> None:
+    _create_seqrec_dataset(tmp_path)
+    train_dataset = SeqRecTrainDataset(tmp_path, max_len=5)
+    sample0 = train_dataset[0]
+    sample1 = train_dataset[1]
+    device = torch.device("cuda")
+    batch = collate_left_pad([sample0, sample1], max_len=5, device=device)
+    assert batch.input_ids.device == device
+    assert batch.mask.device == device
+    assert batch.target.device == device
+    assert batch.user_ids.device == device
+
+
+def test_seqrec_batch_to_roundtrip(tmp_path: Path) -> None:
+    _create_seqrec_dataset(tmp_path)
+    train_dataset = SeqRecTrainDataset(tmp_path, max_len=5)
+    sample = train_dataset[0]
+    batch = collate_left_pad([sample], max_len=5, pin_memory=True)
+    moved = batch.to(torch.device("cpu"))
+    assert isinstance(moved, type(batch))
+    assert moved.input_ids.device.type == "cpu"
 
 
 def test_eval_dataset_context(tmp_path: Path) -> None:

@@ -196,7 +196,15 @@ class SeqRecEvalDataset(Dataset[Tuple[int, List[int], int]]):
         return self._histories[user_id]
 
 
-def collate_left_pad(samples: Iterable[Tuple[int, Sequence[int], int]], max_len: int) -> SeqRecBatch:
+def collate_left_pad(
+    samples: Iterable[Tuple[int, Sequence[int], int]],
+    *,
+    max_len: int,
+    pad_token_id: int = 0,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype | None = None,
+    pin_memory: bool = False,
+) -> SeqRecBatch:
     """Left-pad item sequences to a fixed maximum length."""
 
     samples_list = list(samples)
@@ -204,21 +212,68 @@ def collate_left_pad(samples: Iterable[Tuple[int, Sequence[int], int]], max_len:
     if batch_size == 0:
         raise ValueError("collate_left_pad received an empty batch")
 
-    padded = torch.zeros(batch_size, max_len, dtype=torch.long)
-    mask = torch.zeros(batch_size, max_len, dtype=torch.bool)
-    targets = torch.zeros(batch_size, dtype=torch.long)
-    user_ids = torch.zeros(batch_size, dtype=torch.long)
+    if max_len <= 0:
+        raise ValueError("max_len must be positive")
 
-    for row, (user_id, context, target) in enumerate(samples_list):
+    target_device = torch.device(device) if device is not None else torch.device("cpu")
+    use_pin_memory = pin_memory and target_device.type == "cpu"
+    seq_dtype = dtype or torch.long
+
+    ragged_parts: List[torch.Tensor] = []
+    lengths: List[int] = []
+    targets_list: List[int] = []
+    user_ids_list: List[int] = []
+    for user_id, context, target in samples_list:
         trimmed = list(context)[-max_len:]
-        length = len(trimmed)
-        if length:
-            padded[row, max_len - length :].copy_(
-                torch.as_tensor(trimmed, dtype=torch.long)
+        trimmed_len = len(trimmed)
+        lengths.append(trimmed_len)
+        if trimmed_len:
+            ragged_parts.append(
+                torch.tensor(trimmed, dtype=seq_dtype, device=target_device)
             )
-            mask[row, max_len - length :] = True
-        targets[row] = int(target)
-        user_ids[row] = int(user_id)
+        targets_list.append(int(target))
+        user_ids_list.append(int(user_id))
+
+    if ragged_parts:
+        ragged = torch.cat(ragged_parts)
+    else:
+        ragged = torch.empty(0, dtype=seq_dtype, device=target_device)
+
+    lengths_tensor = torch.tensor(lengths, dtype=torch.long, device=target_device)
+
+    padded = torch.empty(
+        batch_size,
+        max_len,
+        dtype=seq_dtype,
+        device=target_device,
+        pin_memory=use_pin_memory,
+    )
+    padded.fill_(pad_token_id)
+
+    positions = torch.arange(max_len, device=target_device)
+    mask_computed = positions.expand(batch_size, -1) >= (
+        max_len - lengths_tensor
+    ).unsqueeze(1)
+    if use_pin_memory:
+        mask = torch.empty(
+            batch_size,
+            max_len,
+            dtype=torch.bool,
+            device=target_device,
+            pin_memory=True,
+        )
+        mask.copy_(mask_computed)
+    else:
+        mask = mask_computed
+
+    if ragged.numel() > 0:
+        padded.masked_scatter_(mask, ragged)
+
+    targets = torch.tensor(targets_list, dtype=torch.long, device=target_device)
+    user_ids = torch.tensor(user_ids_list, dtype=torch.long, device=target_device)
+    if use_pin_memory:
+        targets = targets.pin_memory()
+        user_ids = user_ids.pin_memory()
 
     if __debug__:
         non_empty = mask.any(dim=1)
