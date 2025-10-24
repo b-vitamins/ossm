@@ -14,7 +14,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
 from ..data.datasets.collate import coeff_collate, pad_collate, path_collate
-from ..models import Backbone, BatchOnDevice, ClassificationHead, Head, RegressionHead
+from ..models import Backbone, BatchOnDevice, ClassificationHead, Head
 
 LOGGER = logging.getLogger(__name__)
 
@@ -78,7 +78,9 @@ def train(cfg: DictConfig) -> None:
     head.to(device)
 
     params = list(backbone.parameters()) + list(head.parameters())
-    optimizer = AdamW(params, lr=cfg.training.lr, weight_decay=cfg.training.weight_decay)
+    optimizer = AdamW(
+        params, lr=cfg.training.lr, weight_decay=cfg.training.weight_decay
+    )
     state = TrainState()
     backbone.train()
     head.train()

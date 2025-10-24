@@ -46,6 +46,12 @@ pyright
 
 # optional formatting
 ruff format .
+
+# before opening a PR or requesting review, run all of the following
+ruff check .
+ruff format .
+pyright
+pytest
 ```
 
 ## Coding Style & Naming Conventions
