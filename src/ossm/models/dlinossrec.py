@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch import nn
@@ -30,13 +30,13 @@ def _last_mask_index(mask: torch.Tensor) -> torch.LongTensor:
 
     batch, seq_len = mask.shape
     if seq_len == 0:
-        return torch.zeros(batch, dtype=torch.long, device=mask.device)
+        return cast(torch.LongTensor, torch.zeros(batch, dtype=torch.long, device=mask.device))
 
     mask_bool = mask.to(dtype=torch.bool)
     positions = torch.arange(seq_len, device=mask.device, dtype=torch.long).unsqueeze(0)
     masked_positions = torch.where(mask_bool, positions, positions.new_full((1, seq_len), -1))
     last_index = masked_positions.max(dim=1).values
-    return last_index.clamp(min=0)
+    return cast(torch.LongTensor, last_index.clamp(min=0).long())
 
 
 class ItemEmbeddingEncoder(nn.Module):
