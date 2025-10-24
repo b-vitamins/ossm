@@ -63,25 +63,21 @@ def _selective_scan_discretized(
     B_proj = B_t.to(dtype=torch.float32)
     C_proj = C_t.to(dtype=torch.float32)
 
-    state = torch.zeros(batch, channels, A_matrix.size(1), device=inputs.device, dtype=torch.float32)
-    outputs: list[torch.Tensor] = []
+    # Expand the diagonal dynamics along the sequence dimension.
+    a_matrix = A_matrix.unsqueeze(0).unsqueeze(2)  # (1, channels, 1, state)
+    dA = dt.unsqueeze(-1) * a_matrix  # (batch, channels, length, state)
+    A_bar = torch.exp(dA)
+    phi = _safe_expm1(dA) / a_matrix
 
-    # Broadcast helpers.
-    for timestep in range(seqlen):
-        dt_t = dt[:, :, timestep].unsqueeze(-1)  # (batch, channels, 1)
-        u_t = u[:, :, timestep].unsqueeze(-1)  # (batch, channels, 1)
-        B_step = B_proj[:, timestep, :].unsqueeze(1)  # (batch, 1, state)
-        C_step = C_proj[:, timestep, :]  # (batch, state)
+    # Evaluate the forcing term (phi * B_t) * u_t in parallel across time.
+    forcing = (phi * B_proj.unsqueeze(1)) * u.unsqueeze(-1)
 
-        dA = dt_t * A_matrix  # (batch, channels, state)
-        A_bar = torch.exp(dA)
-        phi = _safe_expm1(dA) / A_matrix
+    # Unroll the diagonal recurrence using cumulative products/sums.
+    prefix_prod = torch.cumprod(A_bar, dim=2)
+    scaled_forcing = forcing / prefix_prod
+    state = prefix_prod * torch.cumsum(scaled_forcing, dim=2)
 
-        state = (A_bar * state) + (phi * B_step) * u_t
-        y_t = torch.einsum("bcn,bn->bc", state, C_step)
-        outputs.append(y_t)
-
-    y = torch.stack(outputs, dim=-1)
+    y = torch.einsum("bcls,bls->bcl", state, C_proj)
     return y.to(dtype=inputs.dtype)
 
 
