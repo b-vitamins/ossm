@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import cast
 
+import importlib
+
 import torch
-import torchcde
 
 from .compose import TimeSeriesSample
 
@@ -35,6 +36,7 @@ class ToCubicSplineCoeffs:
         if values.ndim == 1:
             values = values.unsqueeze(-1)
 
+        torchcde = _lazy_torchcde()
         coeffs = torchcde.natural_cubic_coeffs(values.unsqueeze(0), t=times)
         updated = sample.copy()
         updated["coeffs"] = coeffs.squeeze(0)
@@ -45,3 +47,15 @@ class ToCubicSplineCoeffs:
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
 
+
+_TORCHCDE_MISSING = (
+    "torchcde is required for Neural CDE support. Install it via "
+    "`pip install ossm[cde]` or `pip install torchcde`."
+)
+
+
+def _lazy_torchcde():
+    try:
+        return importlib.import_module("torchcde")
+    except ModuleNotFoundError as err:  # pragma: no cover - defensive
+        raise RuntimeError(_TORCHCDE_MISSING) from err

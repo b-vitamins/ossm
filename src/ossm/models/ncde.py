@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import math
 from dataclasses import dataclass
 from typing import Dict, Mapping, Optional, Sequence, Tuple, cast
@@ -9,8 +10,6 @@ from typing import Dict, Mapping, Optional, Sequence, Tuple, cast
 import torch
 from torch import Tensor, nn
 
-import torchcde
-from torchdiffeq import odeint
 
 from .base import Backbone, SequenceBackboneOutput
 
@@ -242,6 +241,7 @@ class NCDELayer(nn.Module):
             features = hidden0.unsqueeze(1).expand(-1, evaluation_times.numel(), -1).contiguous()
             return features, hidden0
 
+        torchcde = _lazy_torchcde()
         spline = torchcde.CubicSpline(
             coeffs.to(device=hidden0.device, dtype=hidden0.dtype),
             t=times.to(device=hidden0.device, dtype=hidden0.dtype),
@@ -360,6 +360,7 @@ class NRDELayer(nn.Module):
             return torch.einsum("bhd,bd->bh", vf, coeff) / dt
 
         options = {"step_size": self.step_size}
+        odeint = _lazy_odeint()
         solution = odeint(
             func,
             hidden0,
@@ -518,3 +519,30 @@ class NCDEBackbone(Backbone):
 
         return SequenceBackboneOutput(features=features, pooled=final)
 
+_TORCHCDE_MISSING = (
+    "torchcde is required for Neural CDE support. Install it via "
+    "`pip install ossm[cde]` or `pip install torchcde`."
+)
+
+
+def _lazy_torchcde():
+    try:
+        return importlib.import_module("torchcde")
+    except ModuleNotFoundError as err:  # pragma: no cover - defensive
+        raise RuntimeError(_TORCHCDE_MISSING) from err
+
+
+def _lazy_odeint():
+    try:
+        module = importlib.import_module("torchdiffeq")
+    except ModuleNotFoundError as err:  # pragma: no cover - defensive
+        raise RuntimeError(
+            "torchdiffeq is required for Neural CDE support. Install it via "
+            "`pip install torchdiffeq`."
+        ) from err
+    try:
+        return getattr(module, "odeint")
+    except AttributeError as err:  # pragma: no cover - defensive
+        raise RuntimeError(
+            "torchdiffeq does not expose 'odeint'; please verify the installation."
+        ) from err
