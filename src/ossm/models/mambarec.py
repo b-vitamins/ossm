@@ -11,7 +11,7 @@ from torch import nn
 from torch.nn import ModuleList
 
 from ._selective_scan import try_selective_scan as _try_selective_scan
-from .dlinossrec import ItemEmbeddingEncoder
+from .dlinossrec import ItemEmbeddingEncoder, _last_mask_index
 from .heads import TiedSoftmaxHead
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
@@ -367,11 +367,7 @@ class Mamba4Rec(nn.Module):
         hidden = self.encoder(input_ids)
         for layer in self.layers:
             hidden = layer(hidden)
-        seq_len = mask.size(1)
-        positions = torch.arange(seq_len, device=mask.device, dtype=torch.long)
-        positions = positions.unsqueeze(0)
-        mask_indices = mask.to(dtype=positions.dtype)
-        last_index = (positions * mask_indices).amax(dim=1)
+        last_index = _last_mask_index(mask).to(device=hidden.device)
         batch_indices = torch.arange(hidden.size(0), device=hidden.device)
         return hidden[batch_indices, last_index]
 
