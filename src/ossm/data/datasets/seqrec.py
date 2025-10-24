@@ -196,7 +196,14 @@ class SeqRecEvalDataset(Dataset[Tuple[int, List[int], int]]):
         return self._histories[user_id]
 
 
-def collate_left_pad(samples: Iterable[Tuple[int, Sequence[int], int]], max_len: int) -> SeqRecBatch:
+def collate_left_pad(
+    samples: Iterable[Tuple[int, Sequence[int], int]],
+    max_len: int,
+    *,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype | None = None,
+    pin_memory: bool = False,
+) -> SeqRecBatch:
     """Left-pad item sequences to a fixed maximum length."""
 
     samples_list = list(samples)
@@ -204,23 +211,106 @@ def collate_left_pad(samples: Iterable[Tuple[int, Sequence[int], int]], max_len:
     if batch_size == 0:
         raise ValueError("collate_left_pad received an empty batch")
 
-    padded = torch.zeros(batch_size, max_len, dtype=torch.long)
-    mask = torch.zeros(batch_size, max_len, dtype=torch.bool)
-    targets = torch.zeros(batch_size, dtype=torch.long)
-    user_ids = torch.zeros(batch_size, dtype=torch.long)
+    first_user, first_context, first_target = samples_list[0]
+    context_tensor = first_context if isinstance(first_context, torch.Tensor) else None
 
-    for row, (user_id, context, target) in enumerate(samples_list):
-        trimmed = list(context)[-max_len:]
-        length = len(trimmed)
-        if length:
-            padded[row, max_len - length :].copy_(
-                torch.as_tensor(trimmed, dtype=torch.long)
+    if device is None:
+        if context_tensor is not None:
+            out_device = context_tensor.device
+        else:
+            tensor_candidate = next(
+                (
+                    value
+                    for value in (first_user, first_target)
+                    if isinstance(value, torch.Tensor)
+                ),
+                None,
             )
-            mask[row, max_len - length :] = True
-        targets[row] = int(target)
-        user_ids[row] = int(user_id)
+            out_device = tensor_candidate.device if tensor_candidate is not None else torch.device("cpu")
+    else:
+        out_device = torch.device(device)
 
-    if __debug__:
+    context_dtype = dtype or (
+        context_tensor.dtype if context_tensor is not None else torch.long
+    )
+
+    first_target_tensor = first_target if isinstance(first_target, torch.Tensor) else None
+    target_dtype = (
+        first_target_tensor.dtype
+        if first_target_tensor is not None
+        else torch.long
+    )
+
+    first_user_tensor = first_user if isinstance(first_user, torch.Tensor) else None
+    user_dtype = (
+        first_user_tensor.dtype
+        if first_user_tensor is not None
+        else torch.long
+    )
+
+    pin_on_cpu = (
+        bool(pin_memory)
+        and out_device.type == "cpu"
+        and torch.cuda.is_available()
+    )
+
+    trimmed_contexts: List[torch.Tensor] = []
+    lengths: List[int] = []
+    targets_buffer: List[torch.Tensor] = []
+    users_buffer: List[torch.Tensor] = []
+
+    for user_id, context, target in samples_list:
+        context_tensor = torch.as_tensor(context, dtype=context_dtype, device=out_device)
+        if max_len and context_tensor.numel() > max_len:
+            context_tensor = context_tensor[-max_len:]
+        trimmed_contexts.append(context_tensor)
+        lengths.append(int(context_tensor.numel()))
+
+        targets_buffer.append(torch.as_tensor(target, dtype=target_dtype, device=out_device))
+        users_buffer.append(torch.as_tensor(user_id, dtype=user_dtype, device=out_device))
+
+    total_tokens = int(sum(lengths))
+    lengths_tensor = torch.as_tensor(lengths, dtype=torch.long, device=out_device)
+
+    padded = torch.empty(
+        batch_size,
+        max_len,
+        dtype=context_dtype,
+        device=out_device,
+        pin_memory=pin_on_cpu,
+    )
+    padded.fill_(0)
+
+    if max_len:
+        positions = torch.arange(max_len, device=out_device)
+        mask_template = positions.unsqueeze(0) >= (max_len - lengths_tensor).unsqueeze(1)
+    else:
+        mask_template = torch.zeros(batch_size, 0, dtype=torch.bool, device=out_device)
+
+    if pin_on_cpu:
+        mask = torch.empty_like(mask_template, pin_memory=True)
+        if mask.numel():
+            mask.copy_(mask_template)
+    else:
+        mask = mask_template
+
+    if total_tokens:
+        flat_context = torch.cat(trimmed_contexts, dim=0)
+        padded[mask] = flat_context
+
+    targets_tensor = torch.stack(targets_buffer)
+    users_tensor = torch.stack(users_buffer)
+
+    if pin_on_cpu:
+        targets = torch.empty_like(targets_tensor, pin_memory=True)
+        targets.copy_(targets_tensor)
+        user_ids = torch.empty_like(users_tensor, pin_memory=True)
+        user_ids.copy_(users_tensor)
+    else:
+        targets = targets_tensor
+        user_ids = users_tensor
+
+    if __debug__ and max_len:
         non_empty = mask.any(dim=1)
         if torch.any(non_empty) and not torch.all(mask[non_empty, -1]):
             raise AssertionError(

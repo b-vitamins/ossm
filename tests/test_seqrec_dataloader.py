@@ -5,9 +5,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 from ossm.data.datasets.seqrec import SeqRecEvalDataset, SeqRecTrainDataset, collate_left_pad
-
-pytest.importorskip("pyarrow")
 
 
 def _create_seqrec_dataset(root: Path) -> None:
@@ -26,6 +25,7 @@ def _create_seqrec_dataset(root: Path) -> None:
 
 
 def test_collate_left_pad(tmp_path: Path) -> None:
+    pytest.importorskip("pyarrow")
     _create_seqrec_dataset(tmp_path)
     train_dataset = SeqRecTrainDataset(tmp_path, max_len=5)
     sample0 = train_dataset[0]
@@ -38,6 +38,7 @@ def test_collate_left_pad(tmp_path: Path) -> None:
 
 
 def test_eval_dataset_context(tmp_path: Path) -> None:
+    pytest.importorskip("pyarrow")
     _create_seqrec_dataset(tmp_path)
     val_dataset = SeqRecEvalDataset(tmp_path, split="val", max_len=5)
     test_dataset = SeqRecEvalDataset(tmp_path, split="test", max_len=5)
@@ -45,3 +46,70 @@ def test_eval_dataset_context(tmp_path: Path) -> None:
     assert user0_context == [1, 2, 3]
     user1_context = test_dataset.context_for_user(1)
     assert user1_context[-1] == 8
+
+
+def test_collate_left_pad_pin_memory_behavior() -> None:
+    samples = [
+        (0, [1, 2, 3], 4),
+        (1, [5], 6),
+    ]
+    batch = collate_left_pad(samples, max_len=4, pin_memory=True, dtype=torch.int16)
+
+    assert batch.input_ids.dtype == torch.int16
+
+    if torch.cuda.is_available():
+        assert batch.input_ids.is_pinned()
+        assert batch.target.is_pinned()
+        assert batch.mask.is_pinned()
+        assert batch.user_ids.is_pinned()
+    else:
+        assert not batch.input_ids.is_pinned()
+        assert not batch.mask.is_pinned()
+
+    expected_inputs = torch.tensor(
+        [[0, 1, 2, 3], [0, 0, 0, 5]], dtype=batch.input_ids.dtype
+    )
+    expected_mask = torch.tensor(
+        [[0, 1, 1, 1], [0, 0, 0, 1]], dtype=torch.bool
+    )
+    assert torch.equal(batch.input_ids.cpu(), expected_inputs)
+    assert torch.equal(batch.mask.cpu(), expected_mask)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_collate_left_pad_cuda_dtype_and_to() -> None:
+    device = torch.device("cuda")
+    samples = [
+        (
+            torch.tensor(0, device=device, dtype=torch.int32),
+            torch.tensor([1, 2, 3, 4], device=device, dtype=torch.int32),
+            torch.tensor(9, device=device, dtype=torch.int16),
+        ),
+        (
+            torch.tensor(1, device=device, dtype=torch.int32),
+            torch.tensor([5, 6], device=device, dtype=torch.int32),
+            torch.tensor(10, device=device, dtype=torch.int16),
+        ),
+    ]
+
+    batch = collate_left_pad(samples, max_len=4)
+
+    assert batch.input_ids.device == device
+    assert batch.mask.device == device
+    assert batch.input_ids.dtype == torch.int32
+    assert batch.target.dtype == torch.int16
+    assert batch.user_ids.dtype == torch.int32
+
+    expected_inputs = torch.tensor(
+        [[1, 2, 3, 4], [0, 0, 5, 6]], device=device, dtype=torch.int32
+    )
+    expected_mask = torch.tensor(
+        [[1, 1, 1, 1], [0, 0, 1, 1]], device=device, dtype=torch.bool
+    )
+    assert torch.equal(batch.input_ids, expected_inputs)
+    assert torch.equal(batch.mask, expected_mask)
+
+    moved = batch.to("cpu")
+    assert moved.input_ids.device.type == "cpu"
+    assert moved.input_ids.dtype == batch.input_ids.dtype
+    assert torch.equal(moved.target.cpu(), batch.target.cpu())
