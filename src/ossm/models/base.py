@@ -56,6 +56,17 @@ class Head(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - interface
         raise NotImplementedError
 
+    def forward_from_backbone(self, backbone_out: SequenceBackboneOutput) -> torch.Tensor:  # pragma: no cover - interface
+        """Map a backbone output to the predictions consumed by the loss."""
+
+        raise NotImplementedError
+
+    @property
+    def loss_module(self) -> nn.Module:  # pragma: no cover - interface
+        """Return the default loss used for this head."""
+
+        raise NotImplementedError
+
 
 def _to_device(obj: Any, *, device: torch.device, dtype: torch.dtype | None) -> Any:
     if isinstance(obj, torch.Tensor):

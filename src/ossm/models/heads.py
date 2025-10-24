@@ -9,7 +9,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from .base import Head
+from .base import Head, SequenceBackboneOutput
 
 __all__ = [
     "ClassificationHead",
@@ -25,9 +25,21 @@ class ClassificationHead(Head):
         super().__init__()
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.linear = nn.Linear(hidden_dim, num_classes)
+        self._loss = nn.CrossEntropyLoss()
 
     def forward(self, pooled: torch.Tensor) -> torch.Tensor:
         return self.linear(self.dropout(pooled))
+
+    def forward_from_backbone(self, backbone_out: SequenceBackboneOutput) -> torch.Tensor:
+        if backbone_out.pooled is None:
+            raise ValueError(
+                "Classification heads require pooled representations from the backbone"
+            )
+        return self.forward(backbone_out.pooled)
+
+    @property
+    def loss_module(self) -> nn.Module:
+        return self._loss
 
 
 class RegressionHead(Head):
@@ -36,9 +48,17 @@ class RegressionHead(Head):
     def __init__(self, hidden_dim: int, output_dim: int) -> None:
         super().__init__()
         self.linear = nn.Linear(hidden_dim, output_dim)
+        self._loss = nn.MSELoss()
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         return self.linear(features)
+
+    def forward_from_backbone(self, backbone_out: SequenceBackboneOutput) -> torch.Tensor:
+        return self.forward(backbone_out.features)
+
+    @property
+    def loss_module(self) -> nn.Module:
+        return self._loss
 
 
 @dataclass(frozen=True)

@@ -9,7 +9,7 @@ from typing import Callable, Tuple
 from hydra.utils import instantiate, to_absolute_path  # type: ignore[import]
 from omegaconf import DictConfig  # type: ignore[import]
 import torch
-from torch import Tensor, nn
+from torch import Tensor
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
@@ -49,23 +49,13 @@ def step(
     backbone: Backbone,
     head: Head,
     batch: BatchOnDevice,
-    criterion: nn.Module,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     backbone_inputs = backbone.prepare_batch(batch)
     backbone_out = backbone(backbone_inputs)
     targets = head.prepare_batch(batch)
-
-    if isinstance(head, ClassificationHead):
-        if backbone_out.pooled is None:
-            raise ValueError("Classification heads require pooled representations from the backbone")
-        logits = head(backbone_out.pooled)
-        loss = criterion(logits, targets)
-        return loss, logits, targets
-    if isinstance(head, RegressionHead):
-        preds = head(backbone_out.features)
-        loss = criterion(preds, targets)
-        return loss, preds, targets
-    raise TypeError(f"Unsupported head type: {type(head)!r}")
+    outputs = head.forward_from_backbone(backbone_out)
+    loss = head.loss_module(outputs, targets)
+    return loss, outputs, targets
 
 
 def train(cfg: DictConfig) -> None:
@@ -89,12 +79,6 @@ def train(cfg: DictConfig) -> None:
 
     params = list(backbone.parameters()) + list(head.parameters())
     optimizer = AdamW(params, lr=cfg.training.lr, weight_decay=cfg.training.weight_decay)
-    criterion: nn.Module
-    if isinstance(head, ClassificationHead):
-        criterion = nn.CrossEntropyLoss()
-    else:
-        criterion = nn.MSELoss()
-
     state = TrainState()
     backbone.train()
     head.train()
@@ -103,7 +87,7 @@ def train(cfg: DictConfig) -> None:
         for batch_idx, batch in enumerate(train_loader):
             optimizer.zero_grad()
             batch_on_device = BatchOnDevice.from_batch(batch, device=device)
-            loss, outputs, _ = step(backbone, head, batch_on_device, criterion)
+            loss, outputs, _ = step(backbone, head, batch_on_device)
             loss.backward()
             optimizer.step()
             state.global_step += 1
@@ -114,15 +98,13 @@ def train(cfg: DictConfig) -> None:
                     state.global_step,
                     loss.item(),
                 )
-
-        evaluate(backbone, head, val_loader, criterion, device)
+        evaluate(backbone, head, val_loader, device)
 
 
 def evaluate(
     backbone: Backbone,
     head: Head,
     loader: DataLoader,
-    criterion: nn.Module,
     device: torch.device,
 ) -> None:
     backbone.eval()
@@ -133,7 +115,7 @@ def evaluate(
     with torch.no_grad():
         for batch in loader:
             batch_on_device = BatchOnDevice.from_batch(batch, device=device)
-            loss, outputs, targets = step(backbone, head, batch_on_device, criterion)
+            loss, outputs, targets = step(backbone, head, batch_on_device)
             batch_size = targets.size(0)
             total_loss += loss.item() * batch_size
             total += batch_size
