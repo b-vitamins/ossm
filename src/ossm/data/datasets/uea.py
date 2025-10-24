@@ -7,7 +7,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from . import utils  # keep module import so monkeypatch works
+from . import io as io_utils
+from . import labeling as labeling_utils
 from ..transforms.compose import Compose, TimeSeriesSample
 from ..transforms.path import AddTime, NormalizeTime
 from ..transforms.cde import ToCubicSplineCoeffs
@@ -56,14 +57,14 @@ class UEA(Dataset):
 
         if download:
             # Parity with torchvision-style datasets; creates expected folder layout.
-            utils.ensure_uea_layout(root)
+            io_utils.ensure_uea_layout(root)
 
         self._target_split = self._normalize_target(split)
         base_splits = self._normalize_sources(split, source_splits, resample)
         self._source_encoding = {"train": 0, "test": 1}
         self.source_split_encoding = dict(self._source_encoding)
 
-        loader_fn = loader if loader is not None else utils.load_uea_numpy
+        loader_fn = loader if loader is not None else io_utils.load_uea_numpy
 
         times_parts: List[torch.Tensor] = []
         values_parts: List[torch.Tensor] = []
@@ -86,7 +87,7 @@ class UEA(Dataset):
                 values_np, labels_np = out
 
             values = torch.as_tensor(values_np, dtype=torch.float32)
-            labels = utils.encode_labels(labels_np)
+            labels = labeling_utils.encode_labels(labels_np)
 
             if times_tensor is None:
                 N, T, _ = values.shape

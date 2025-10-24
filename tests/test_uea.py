@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from ossm.data.datasets.uea import UEA
-import ossm.data.datasets.utils as utils
+import ossm.data.datasets.io as io_utils
 
 
 def _fake_loader(root, name, split):
@@ -52,7 +52,7 @@ def _loader_with_times(root, name, split):
 
 
 def test_uea_raw_monkeypatch(monkeypatch):
-    monkeypatch.setattr(utils, "load_uea_numpy", _fake_loader)
+    monkeypatch.setattr(io_utils, "load_uea_numpy", _fake_loader)
     ds = UEA(root=".", name="Dummy", split="train", view="raw")
     item = ds[0]
     assert set(item.keys()) == {"times", "values", "label"}
@@ -62,7 +62,7 @@ def test_uea_raw_monkeypatch(monkeypatch):
 
 @pytest.mark.parametrize("view", ["raw", "coeff", "path"])
 def test_uea_views_smoke(monkeypatch, view):
-    monkeypatch.setattr(utils, "load_uea_numpy", _fake_loader)
+    monkeypatch.setattr(io_utils, "load_uea_numpy", _fake_loader)
     kwargs = {}
     if view == "path":
         kwargs.update(dict(depth=2, steps=8))
@@ -72,7 +72,7 @@ def test_uea_views_smoke(monkeypatch, view):
 
 
 def test_uea_all_split(monkeypatch):
-    monkeypatch.setattr(utils, "load_uea_numpy", _fake_loader)
+    monkeypatch.setattr(io_utils, "load_uea_numpy", _fake_loader)
     ds_all = UEA(root=".", name="Dummy", split="all", view="raw")
     assert len(ds_all) == 12
 
@@ -81,7 +81,7 @@ def test_uea_all_split(monkeypatch):
 
 
 def test_uea_deduplicate_across_splits(monkeypatch):
-    monkeypatch.setattr(utils, "load_uea_numpy", _loader_with_times)
+    monkeypatch.setattr(io_utils, "load_uea_numpy", _loader_with_times)
 
     baseline = UEA(root=".", name="Dummy", split="all", view="raw")
     assert len(baseline) == 7
@@ -107,7 +107,7 @@ def test_uea_deduplicate_across_splits(monkeypatch):
 
 
 def test_uea_resample_partition(monkeypatch):
-    monkeypatch.setattr(utils, "load_uea_numpy", _fake_loader)
+    monkeypatch.setattr(io_utils, "load_uea_numpy", _fake_loader)
     resample_cfg = {"train": 6, "val": 3, "test": 3}
     common_kwargs = dict(
         root=".",
@@ -148,7 +148,7 @@ def test_uea_resample_partition(monkeypatch):
 
 
 def test_uea_record_grid_and_source(monkeypatch):
-    monkeypatch.setattr(utils, "load_uea_numpy", _loader_with_times)
+    monkeypatch.setattr(io_utils, "load_uea_numpy", _loader_with_times)
     ds = UEA(
         root=".",
         name="Dummy",

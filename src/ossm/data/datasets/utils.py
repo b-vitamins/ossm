@@ -1,136 +1,24 @@
 from __future__ import annotations
 
-import importlib
-import importlib.util
-import os
-import pickle
-import warnings
-from typing import Tuple
+"""Compatibility re-export for dataset helper utilities.
 
-import numpy as np
-import pandas as pd
-from sklearn.preprocessing import LabelEncoder
-import torch
-from torch import Tensor
+Prefer importing from :mod:`ossm.data.datasets.io`, ``.labeling``, or ``.cache``
+for new code. The symbols are preserved here to avoid breaking downstream
+imports.
+"""
 
+from .cache import cache_key, maybe_save_cache
+from .io import deduplicate_pairs, ensure_uea_layout, load_uea_numpy, load_uea_tensors
+from .labeling import encode_labels, fit_label_encoder, transform_labels
 
-def _arff_path(root: str, name: str, split: str) -> str:
-    split = split.upper()
-    return os.path.join(
-        root, "raw", "UEA", "Multivariate_arff", name, f"{name}_{split}.arff"
-    )
-
-
-def _df_to_numpy(data_df: pd.DataFrame) -> np.ndarray:
-    data_expand = data_df.map(lambda x: x.values).values
-    return np.stack([np.vstack(x).T for x in data_expand]).astype(np.float32)
-
-
-def _load_processed_split(root: str, name: str, split: str) -> Tuple[np.ndarray, np.ndarray]:
-    """Load a dataset split from the processed LinOSS layout if available."""
-
-    split = split.lower()
-    base = os.path.join(root, "processed", "UEA", name)
-    if not os.path.isdir(base):
-        raise FileNotFoundError
-
-    if split in {"train", "test", "val", "validation"}:
-        if split == "validation":
-            split = "val"
-        x_file = os.path.join(base, f"X_{split}.pkl")
-        y_file = os.path.join(base, f"y_{split}.pkl")
-    elif split in {"all", "full"}:
-        x_file = os.path.join(base, "data.pkl")
-        y_file = os.path.join(base, "labels.pkl")
-    else:
-        raise ValueError(f"Unknown processed split '{split}' for dataset '{name}'.")
-
-    if not os.path.exists(x_file) or not os.path.exists(y_file):
-        raise FileNotFoundError
-
-    with open(x_file, "rb") as f:
-        X = pickle.load(f)
-    with open(y_file, "rb") as f:
-        y = pickle.load(f)
-
-    X = np.asarray(X, dtype=np.float32)
-    y = np.asarray(y)
-    if y.ndim > 1:
-        y = y.argmax(axis=-1)
-    return X, y
-
-
-def load_uea_numpy(root: str, name: str, split: str) -> Tuple[np.ndarray, np.ndarray]:
-    try:
-        return _load_processed_split(root, name, split)
-    except FileNotFoundError:
-        pass
-
-    sktime_spec = importlib.util.find_spec("sktime")
-    if sktime_spec is None:
-        raise RuntimeError(
-            "sktime is required to parse ARFF files. Install with `pip install sktime`."
-        )
-    from sktime.datasets import (  # pyright: ignore[reportMissingImports]
-        load_from_arff_to_dataframe,
-    )
-
-    file_path = _arff_path(root, name, split)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=pd.errors.PerformanceWarning)
-        data_df, labels = load_from_arff_to_dataframe(file_path)
-    X = _df_to_numpy(data_df)
-    y = np.asarray(labels)
-    return X, y
-
-
-def ensure_uea_layout(root: str) -> None:
-    """Create the expected UEA folder layout under `root` if missing."""
-    path = os.path.join(root, "raw", "UEA", "Multivariate_arff")
-    os.makedirs(path, exist_ok=True)
-
-
-def encode_labels(labels) -> Tensor:
-    """Encode labels to a 1D torch.long tensor.
-
-    If numeric labels are provided, they're returned as-is (long). Otherwise,
-    a sklearn LabelEncoder is fit on the provided labels.
-    """
-    arr = np.asarray(labels)
-    if arr.dtype.kind in {"i", "u"}:
-        return torch.as_tensor(arr, dtype=torch.long)
-    enc = LabelEncoder()
-    y = enc.fit_transform(arr)
-    return torch.as_tensor(y, dtype=torch.long)
-
-
-def fit_label_encoder(train_labels: np.ndarray) -> LabelEncoder:
-    enc = LabelEncoder()
-    enc.fit(train_labels)
-    return enc
-
-
-def transform_labels(encoder: LabelEncoder, labels: np.ndarray) -> np.ndarray:
-    return encoder.transform(labels).astype(np.int64)
-
-
-def deduplicate_pairs(X: np.ndarray, y: np.ndarray):
-    flat = X.reshape(X.shape[0], -1)
-    _, idx = np.unique(flat, axis=0, return_index=True)
-    return X[idx], y[idx]
-
-
-def cache_key(*parts: str) -> str:
-    return "_".join(parts).replace(os.sep, "-")
-
-
-def maybe_save_cache(dirpath: str, key: str, obj: dict) -> None:
-    try:
-        os.makedirs(dirpath, exist_ok=True)
-        path = os.path.join(dirpath, f"{key}.pt")
-        import torch
-
-        torch.save(obj, path)
-    except Exception:
-        # Best-effort cache.
-        pass
+__all__ = [
+    "cache_key",
+    "deduplicate_pairs",
+    "encode_labels",
+    "ensure_uea_layout",
+    "fit_label_encoder",
+    "load_uea_numpy",
+    "load_uea_tensors",
+    "maybe_save_cache",
+    "transform_labels",
+]
