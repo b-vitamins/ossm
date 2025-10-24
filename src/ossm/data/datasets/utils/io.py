@@ -5,13 +5,19 @@ import importlib.util
 import os
 import pickle
 import warnings
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import LabelEncoder
 import torch
 from torch import Tensor
+
+__all__ = [
+    "ensure_uea_layout",
+    "load_uea_numpy",
+    "load_uea_tensors",
+    "deduplicate_pairs",
+]
 
 
 def _arff_path(root: str, name: str, split: str) -> str:
@@ -61,6 +67,13 @@ def _load_processed_split(root: str, name: str, split: str) -> Tuple[np.ndarray,
 
 
 def load_uea_numpy(root: str, name: str, split: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Load a UEA/UCR dataset split as NumPy arrays.
+
+    The helper first tries the processed LinOSS layout which avoids the heavy
+    dependency chain. Falling back to raw ARFF parsing requires NumPy, Pandas,
+    and ``sktime`` to be available in the environment.
+    """
+
     try:
         return _load_processed_split(root, name, split)
     except FileNotFoundError:
@@ -84,53 +97,42 @@ def load_uea_numpy(root: str, name: str, split: str) -> Tuple[np.ndarray, np.nda
     return X, y
 
 
+def load_uea_tensors(
+    root: str,
+    name: str,
+    split: str,
+    *,
+    device: Optional[torch.device | str] = None,
+    dtype: torch.dtype = torch.float32,
+) -> tuple[Tensor, Tensor]:
+    """Torch-centric wrapper around :func:`load_uea_numpy`.
+
+    The values tensor is materialised via ``torch.as_tensor`` to respect the
+    requested ``device`` and ``dtype``. Labels are only converted when they are
+    already numeric; string labels should be encoded separately via
+    :func:`ossm.data.datasets.utils.labeling.encode_labels`.
+    """
+
+    values_np, labels_np = load_uea_numpy(root, name, split)
+    values = torch.as_tensor(values_np, dtype=dtype, device=device)
+    try:
+        labels = torch.as_tensor(labels_np, device=device)
+    except (TypeError, ValueError) as err:
+        raise TypeError(
+            "load_uea_tensors requires numeric labels. "
+            "Use labeling.encode_labels before converting to tensors."
+        ) from err
+    return values, labels
+
+
 def ensure_uea_layout(root: str) -> None:
-    """Create the expected UEA folder layout under `root` if missing."""
+    """Create the expected UEA folder layout under ``root`` if missing."""
+
     path = os.path.join(root, "raw", "UEA", "Multivariate_arff")
     os.makedirs(path, exist_ok=True)
-
-
-def encode_labels(labels) -> Tensor:
-    """Encode labels to a 1D torch.long tensor.
-
-    If numeric labels are provided, they're returned as-is (long). Otherwise,
-    a sklearn LabelEncoder is fit on the provided labels.
-    """
-    arr = np.asarray(labels)
-    if arr.dtype.kind in {"i", "u"}:
-        return torch.as_tensor(arr, dtype=torch.long)
-    enc = LabelEncoder()
-    y = enc.fit_transform(arr)
-    return torch.as_tensor(y, dtype=torch.long)
-
-
-def fit_label_encoder(train_labels: np.ndarray) -> LabelEncoder:
-    enc = LabelEncoder()
-    enc.fit(train_labels)
-    return enc
-
-
-def transform_labels(encoder: LabelEncoder, labels: np.ndarray) -> np.ndarray:
-    return encoder.transform(labels).astype(np.int64)
 
 
 def deduplicate_pairs(X: np.ndarray, y: np.ndarray):
     flat = X.reshape(X.shape[0], -1)
     _, idx = np.unique(flat, axis=0, return_index=True)
     return X[idx], y[idx]
-
-
-def cache_key(*parts: str) -> str:
-    return "_".join(parts).replace(os.sep, "-")
-
-
-def maybe_save_cache(dirpath: str, key: str, obj: dict) -> None:
-    try:
-        os.makedirs(dirpath, exist_ok=True)
-        path = os.path.join(dirpath, f"{key}.pt")
-        import torch
-
-        torch.save(obj, path)
-    except Exception:
-        # Best-effort cache.
-        pass
