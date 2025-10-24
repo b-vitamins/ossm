@@ -19,7 +19,7 @@ from .rnn import (
 )
 from .s5 import S5Backbone, S5Block, S5Layer
 
-__all__ = [
+_MODELS_PUBLIC_API = (
     "Backbone",
     "Head",
     "SequenceBackboneOutput",
@@ -53,4 +53,6 @@ __all__ = [
     "S5Block",
     "S5Layer",
     "TiedSoftmaxHead",
-]
+)
+
+__all__ = _MODELS_PUBLIC_API
