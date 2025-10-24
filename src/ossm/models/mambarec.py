@@ -73,9 +73,32 @@ def _selective_scan_discretized(
     forcing = (phi * B_proj.unsqueeze(1)) * u.unsqueeze(-1)
 
     # Unroll the diagonal recurrence using cumulative products/sums.
-    prefix_prod = torch.cumprod(A_bar, dim=2)
-    scaled_forcing = forcing / prefix_prod
-    state = prefix_prod * torch.cumsum(scaled_forcing, dim=2)
+    # Guard against extremely contractive dynamics where the cumulative product
+    # would underflow in float32 by falling back to an explicit scan that avoids
+    # dividing by tiny values. This mirrors the numerically stable behavior of
+    # the original Python loop implementation.
+    state_size = A_matrix.shape[-1]
+    log_prefix = torch.cumsum(
+        torch.log(torch.clamp_min(A_bar.double(), torch.finfo(A_bar.dtype).tiny)),
+        dim=2,
+    )
+    tiny_log = math.log(torch.finfo(A_bar.dtype).tiny)
+    needs_sequential = bool(torch.any(log_prefix < tiny_log))
+
+    if needs_sequential:
+        state = torch.zeros(
+            (batch, channels, seqlen, state_size),
+            dtype=u.dtype,
+            device=u.device,
+        )
+        prev = torch.zeros((batch, channels, state_size), dtype=u.dtype, device=u.device)
+        for t in range(seqlen):
+            prev = A_bar[:, :, t] * prev + forcing[:, :, t]
+            state[:, :, t] = prev
+    else:
+        prefix_prod = torch.cumprod(A_bar, dim=2)
+        scaled_forcing = forcing / prefix_prod
+        state = prefix_prod * torch.cumsum(scaled_forcing, dim=2)
 
     y = torch.einsum("bcls,bls->bcl", state, C_proj)
     return y.to(dtype=inputs.dtype)
