@@ -1,13 +1,80 @@
 """OSSM package public exports."""
 
 from . import data, metrics
-from . import models as _models
-from .models import __all__ as _models_all
+from .models import (
+    MODELS_PUBLIC_EXPORTS,
+    AbstractRNNCell,
+    Backbone,
+    ClassificationHead,
+    DampedLinOSSBackbone,
+    DampedLinOSSBlock,
+    DampedLinOSSLayer,
+    Dlinoss4Rec,
+    GRURNNCell,
+    Head,
+    ItemEmbeddingEncoder,
+    LRUBackbone,
+    LRUBlock,
+    LRULayer,
+    LSTMRNNCell,
+    LinearRNNCell,
+    LinOSSBackbone,
+    LinOSSBlock,
+    LinOSSLayer,
+    MLPRNNCell,
+    Mamba4Rec,
+    MambaLayer,
+    NCDEBackbone,
+    NCDELayer,
+    NCDEVectorField,
+    NRDELayer,
+    RegressionHead,
+    RNNBackbone,
+    RNNLayer,
+    S5Backbone,
+    S5Block,
+    S5Layer,
+    SequenceBackboneOutput,
+    TiedSoftmaxHead,
+)
 
-__all__ = ("data", "metrics", *_models_all)
+__all__: tuple[str, ...] = (
+    "data",
+    "metrics",
+    "Backbone",
+    "Head",
+    "SequenceBackboneOutput",
+    "ClassificationHead",
+    "RegressionHead",
+    "DampedLinOSSBackbone",
+    "DampedLinOSSBlock",
+    "DampedLinOSSLayer",
+    "Dlinoss4Rec",
+    "ItemEmbeddingEncoder",
+    "Mamba4Rec",
+    "MambaLayer",
+    "LinOSSBackbone",
+    "LinOSSBlock",
+    "LinOSSLayer",
+    "LRUBackbone",
+    "LRUBlock",
+    "LRULayer",
+    "NCDEVectorField",
+    "NCDELayer",
+    "NRDELayer",
+    "NCDEBackbone",
+    "AbstractRNNCell",
+    "LinearRNNCell",
+    "GRURNNCell",
+    "LSTMRNNCell",
+    "MLPRNNCell",
+    "RNNBackbone",
+    "RNNLayer",
+    "S5Backbone",
+    "S5Block",
+    "S5Layer",
+    "TiedSoftmaxHead",
+)
 
-for _name in _models_all:
-    globals()[_name] = getattr(_models, _name)
-
-del _name
-del _models
+if __debug__:
+    assert __all__[2:] == MODELS_PUBLIC_EXPORTS

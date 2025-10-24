@@ -1,17 +1,25 @@
 """Model backbones and task heads."""
 
-from . import base as _base
-from . import dlinoss as _dlinoss
-from . import dlinossrec as _dlinossrec
-from . import heads as _heads
-from . import linoss as _linoss
-from . import lru as _lru
-from . import mambarec as _mambarec
-from . import ncde as _ncde
-from . import rnn as _rnn
-from . import s5 as _s5
+from .base import Backbone, Head, SequenceBackboneOutput
+from .dlinoss import DampedLinOSSBackbone, DampedLinOSSBlock, DampedLinOSSLayer
+from .dlinossrec import Dlinoss4Rec, ItemEmbeddingEncoder
+from .heads import ClassificationHead, RegressionHead, TiedSoftmaxHead
+from .linoss import LinOSSBackbone, LinOSSBlock, LinOSSLayer
+from .lru import LRUBackbone, LRUBlock, LRULayer
+from .mambarec import Mamba4Rec, MambaLayer
+from .ncde import NCDEBackbone, NCDELayer, NCDEVectorField, NRDELayer
+from .rnn import (
+    AbstractRNNCell,
+    GRURNNCell,
+    LinearRNNCell,
+    LSTMRNNCell,
+    MLPRNNCell,
+    RNNBackbone,
+    RNNLayer,
+)
+from .s5 import S5Backbone, S5Block, S5Layer
 
-_MODELS_PUBLIC_API = (
+__all__: tuple[str, ...] = (
     "Backbone",
     "Head",
     "SequenceBackboneOutput",
@@ -47,34 +55,4 @@ _MODELS_PUBLIC_API = (
     "TiedSoftmaxHead",
 )
 
-__all__ = _MODELS_PUBLIC_API
-
-_EXPORT_SOURCES = (
-    (_base, ("Backbone", "Head", "SequenceBackboneOutput")),
-    (_heads, ("ClassificationHead", "RegressionHead", "TiedSoftmaxHead")),
-    (_dlinoss, ("DampedLinOSSBackbone", "DampedLinOSSBlock", "DampedLinOSSLayer")),
-    (_dlinossrec, ("Dlinoss4Rec", "ItemEmbeddingEncoder")),
-    (_mambarec, ("Mamba4Rec", "MambaLayer")),
-    (_linoss, ("LinOSSBackbone", "LinOSSBlock", "LinOSSLayer")),
-    (_lru, ("LRUBackbone", "LRUBlock", "LRULayer")),
-    (_ncde, ("NCDEVectorField", "NCDELayer", "NRDELayer", "NCDEBackbone")),
-    (
-        _rnn,
-        (
-            "AbstractRNNCell",
-            "GRURNNCell",
-            "LinearRNNCell",
-            "LSTMRNNCell",
-            "MLPRNNCell",
-            "RNNBackbone",
-            "RNNLayer",
-        ),
-    ),
-    (_s5, ("S5Backbone", "S5Block", "S5Layer")),
-)
-
-for _module, _names in _EXPORT_SOURCES:
-    for _name in _names:
-        globals()[_name] = getattr(_module, _name)
-
-del _module, _names
+MODELS_PUBLIC_EXPORTS: tuple[str, ...] = __all__
