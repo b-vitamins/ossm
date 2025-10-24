@@ -108,3 +108,48 @@ class BatchOnDevice(Mapping[str, Any]):
     ) -> BatchOnDevice:
         moved = _to_device(batch, device=device, dtype=dtype)
         return cls(moved)
+
+
+class ResidualSSMBlock(nn.Module):
+    """Reusable residual processing block for state-space models."""
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        *,
+        layer: nn.Module,
+        norm: nn.Module | None = None,
+        activation: nn.Module | None = None,
+        glu: nn.Module | None = None,
+        dropout: float | nn.Module = 0.0,
+    ) -> None:
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.norm = norm if norm is not None else nn.BatchNorm1d(hidden_dim, affine=False)
+        self.layer = layer
+        self.activation = activation if activation is not None else nn.Identity()
+        self.glu = glu if glu is not None else nn.Identity()
+        if isinstance(dropout, nn.Module):
+            self.dropout = dropout
+        else:
+            self.dropout = nn.Dropout(dropout)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if inputs.dim() != 3:
+            raise ValueError(
+                f"{type(self).__name__} expects input of shape (batch, length, {self.hidden_dim})."
+            )
+        batch, length, hidden = inputs.shape
+        if hidden != self.hidden_dim:
+            raise ValueError(
+                f"Expected hidden_dim={self.hidden_dim}, received {hidden}."
+            )
+
+        residual = inputs
+        normed = self.norm(inputs.reshape(-1, hidden)).reshape(batch, length, hidden)
+        outputs = self.layer(normed)
+        outputs = self.activation(outputs)
+        outputs = self.dropout(outputs)
+        outputs = self.glu(outputs)
+        outputs = self.dropout(outputs)
+        return outputs + residual

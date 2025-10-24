@@ -1,6 +1,6 @@
 """Model backbones and task heads."""
 
-from .base import Backbone, BatchOnDevice, Head, SequenceBackboneOutput
+from .base import Backbone, BatchOnDevice, Head, ResidualSSMBlock, SequenceBackboneOutput
 from .heads import ClassificationHead, RegressionHead, TiedSoftmaxHead
 from .dlinoss import DampedLinOSSBackbone, DampedLinOSSBlock, DampedLinOSSLayer
 from .dlinossrec import Dlinoss4Rec, ItemEmbeddingEncoder
@@ -47,6 +47,7 @@ __all__: tuple[str, ...] = (
     "NCDEVectorField",
     "NRDELayer",
     "RegressionHead",
+    "ResidualSSMBlock",
     "RNNBackbone",
     "RNNLayer",
     "S5Backbone",
