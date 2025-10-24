@@ -68,23 +68,24 @@ class _ScaledMLP(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        for module in self.hidden:
-            if isinstance(module, nn.Linear):
-                nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
-                module.weight.data.div_(self.scale)
-                if module.bias is not None:
-                    fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
-                    bound = 1.0 / math.sqrt(fan_in)
-                    nn.init.uniform_(module.bias, -bound, bound)
-                    module.bias.data.div_(self.scale)
+        with torch.no_grad():
+            for module in self.hidden:
+                if isinstance(module, nn.Linear):
+                    nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
+                    module.weight.div_(self.scale)
+                    if module.bias is not None:
+                        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
+                        bound = 1.0 / math.sqrt(fan_in)
+                        nn.init.uniform_(module.bias, -bound, bound)
+                        module.bias.div_(self.scale)
 
-        nn.init.kaiming_uniform_(self.output.weight, a=math.sqrt(5))
-        self.output.weight.data.div_(self.scale)
-        if self.output.bias is not None:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.output.weight)
-            bound = 1.0 / math.sqrt(fan_in)
-            nn.init.uniform_(self.output.bias, -bound, bound)
-            self.output.bias.data.div_(self.scale)
+            nn.init.kaiming_uniform_(self.output.weight, a=math.sqrt(5))
+            self.output.weight.div_(self.scale)
+            if self.output.bias is not None:
+                fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.output.weight)
+                bound = 1.0 / math.sqrt(fan_in)
+                nn.init.uniform_(self.output.bias, -bound, bound)
+                self.output.bias.div_(self.scale)
 
     def forward(self, inputs: Tensor) -> Tensor:
         out = self.hidden(inputs)
