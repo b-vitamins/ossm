@@ -1,6 +1,6 @@
 """Model backbones and task heads."""
 
-from .base import Backbone, Head, SequenceBackboneOutput
+from .base import Backbone, BatchOnDevice, Head, SequenceBackboneOutput
 from .heads import ClassificationHead, RegressionHead, TiedSoftmaxHead
 from .dlinoss import DampedLinOSSBackbone, DampedLinOSSBlock, DampedLinOSSLayer
 from .dlinossrec import Dlinoss4Rec, ItemEmbeddingEncoder
@@ -21,6 +21,7 @@ from .s5 import S5Backbone, S5Block, S5Layer
 
 __all__ = [
     "Backbone",
+    "BatchOnDevice",
     "Head",
     "SequenceBackboneOutput",
     "ClassificationHead",
