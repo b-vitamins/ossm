@@ -9,7 +9,9 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
+from torch.nn.utils.rnn import pad_sequence
 
 __all__ = [
     "SeqRecBatch",
@@ -211,7 +213,70 @@ def collate_left_pad(
     if batch_size == 0:
         raise ValueError("collate_left_pad received an empty batch")
 
-    first_user, first_context, first_target = samples_list[0]
+    out_device, context_dtype, target_dtype, user_dtype = _infer_batch_layout(
+        samples_list, device, dtype
+    )
+
+    contexts, lengths_tensor, targets_tensor, users_tensor = _tensorise_batch(
+        samples_list, max_len, out_device, context_dtype, target_dtype, user_dtype
+    )
+
+    if max_len:
+        reversed_contexts = [context.flip(0) for context in contexts]
+        reversed_padded = pad_sequence(
+            reversed_contexts,
+            batch_first=True,
+            padding_value=0,
+        )
+        if reversed_padded.size(1) < max_len:
+            pad_amount = max_len - reversed_padded.size(1)
+            reversed_padded = F.pad(reversed_padded, (0, pad_amount))
+        elif reversed_padded.size(1) > max_len:
+            reversed_padded = reversed_padded[:, :max_len]
+        padded = torch.flip(reversed_padded, dims=(1,))
+    else:
+        padded = torch.empty(
+            batch_size,
+            0,
+            dtype=context_dtype,
+            device=out_device,
+        )
+
+    mask = _build_left_pad_mask(lengths_tensor, padded.size(1))
+
+    pin_on_cpu = (
+        bool(pin_memory)
+        and out_device.type == "cpu"
+        and torch.cuda.is_available()
+    )
+
+    if pin_on_cpu:
+        padded = padded.pin_memory()
+        mask = mask.pin_memory()
+        targets_tensor = targets_tensor.pin_memory()
+        users_tensor = users_tensor.pin_memory()
+
+    if __debug__ and max_len:
+        non_empty = mask.any(dim=1)
+        if torch.any(non_empty) and not torch.all(mask[non_empty, -1]):
+            raise AssertionError(
+                "collate_left_pad expects left padding with last valid token in the final column"
+            )
+
+    return SeqRecBatch(
+        input_ids=padded,
+        target=targets_tensor,
+        mask=mask,
+        user_ids=users_tensor,
+    )
+
+
+def _infer_batch_layout(
+    samples: Sequence[Tuple[int, Sequence[int], int]],
+    device: torch.device | str | None,
+    context_dtype_override: torch.dtype | None,
+) -> Tuple[torch.device, torch.dtype, torch.dtype, torch.dtype]:
+    first_user, first_context, first_target = samples[0]
     context_tensor = first_context if isinstance(first_context, torch.Tensor) else None
 
     if device is None:
@@ -226,96 +291,69 @@ def collate_left_pad(
                 ),
                 None,
             )
-            out_device = tensor_candidate.device if tensor_candidate is not None else torch.device("cpu")
+            out_device = (
+                tensor_candidate.device
+                if tensor_candidate is not None
+                else torch.device("cpu")
+            )
     else:
         out_device = torch.device(device)
 
-    context_dtype = dtype or (
-        context_tensor.dtype if context_tensor is not None else torch.long
+    context_dtype = (
+        context_dtype_override
+        or (context_tensor.dtype if context_tensor is not None else torch.long)
     )
 
     first_target_tensor = first_target if isinstance(first_target, torch.Tensor) else None
     target_dtype = (
-        first_target_tensor.dtype
-        if first_target_tensor is not None
-        else torch.long
+        first_target_tensor.dtype if first_target_tensor is not None else torch.long
     )
 
     first_user_tensor = first_user if isinstance(first_user, torch.Tensor) else None
     user_dtype = (
-        first_user_tensor.dtype
-        if first_user_tensor is not None
-        else torch.long
+        first_user_tensor.dtype if first_user_tensor is not None else torch.long
     )
 
-    pin_on_cpu = (
-        bool(pin_memory)
-        and out_device.type == "cpu"
-        and torch.cuda.is_available()
-    )
+    return out_device, context_dtype, target_dtype, user_dtype
 
-    trimmed_contexts: List[torch.Tensor] = []
+
+def _tensorise_batch(
+    samples: Sequence[Tuple[int, Sequence[int], int]],
+    max_len: int,
+    out_device: torch.device,
+    context_dtype: torch.dtype,
+    target_dtype: torch.dtype,
+    user_dtype: torch.dtype,
+) -> Tuple[List[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
+    contexts: List[torch.Tensor] = []
     lengths: List[int] = []
     targets_buffer: List[torch.Tensor] = []
     users_buffer: List[torch.Tensor] = []
 
-    for user_id, context, target in samples_list:
+    for user_id, context, target in samples:
         context_tensor = torch.as_tensor(context, dtype=context_dtype, device=out_device)
         if max_len and context_tensor.numel() > max_len:
             context_tensor = context_tensor[-max_len:]
-        trimmed_contexts.append(context_tensor)
+        contexts.append(context_tensor)
         lengths.append(int(context_tensor.numel()))
 
-        targets_buffer.append(torch.as_tensor(target, dtype=target_dtype, device=out_device))
+        targets_buffer.append(
+            torch.as_tensor(target, dtype=target_dtype, device=out_device)
+        )
         users_buffer.append(torch.as_tensor(user_id, dtype=user_dtype, device=out_device))
 
-    total_tokens = int(sum(lengths))
     lengths_tensor = torch.as_tensor(lengths, dtype=torch.long, device=out_device)
-
-    padded = torch.empty(
-        batch_size,
-        max_len,
-        dtype=context_dtype,
-        device=out_device,
-        pin_memory=pin_on_cpu,
-    )
-    padded.fill_(0)
-
-    if max_len:
-        positions = torch.arange(max_len, device=out_device)
-        mask_template = positions.unsqueeze(0) >= (max_len - lengths_tensor).unsqueeze(1)
-    else:
-        mask_template = torch.zeros(batch_size, 0, dtype=torch.bool, device=out_device)
-
-    if pin_on_cpu:
-        mask = torch.empty_like(mask_template, pin_memory=True)
-        if mask.numel():
-            mask.copy_(mask_template)
-    else:
-        mask = mask_template
-
-    if total_tokens:
-        flat_context = torch.cat(trimmed_contexts, dim=0)
-        padded[mask] = flat_context
-
     targets_tensor = torch.stack(targets_buffer)
     users_tensor = torch.stack(users_buffer)
 
-    if pin_on_cpu:
-        targets = torch.empty_like(targets_tensor, pin_memory=True)
-        targets.copy_(targets_tensor)
-        user_ids = torch.empty_like(users_tensor, pin_memory=True)
-        user_ids.copy_(users_tensor)
-    else:
-        targets = targets_tensor
-        user_ids = users_tensor
+    return contexts, lengths_tensor, targets_tensor, users_tensor
 
-    if __debug__ and max_len:
-        non_empty = mask.any(dim=1)
-        if torch.any(non_empty) and not torch.all(mask[non_empty, -1]):
-            raise AssertionError(
-                "collate_left_pad expects left padding with last valid token in the final column"
-            )
 
-    return SeqRecBatch(input_ids=padded, target=targets, mask=mask, user_ids=user_ids)
+def _build_left_pad_mask(lengths: torch.Tensor, max_len: int) -> torch.Tensor:
+    if max_len == 0:
+        return torch.zeros(lengths.size(0), 0, dtype=torch.bool, device=lengths.device)
+
+    positions = torch.arange(max_len, device=lengths.device)
+    start_positions = max_len - lengths
+    return positions.unsqueeze(0) >= start_positions.unsqueeze(1)
 
