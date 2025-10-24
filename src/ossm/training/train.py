@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable, Dict, Tuple, cast
+from typing import Callable, Tuple
 
 from hydra.utils import instantiate, to_absolute_path  # type: ignore[import]
 from omegaconf import DictConfig  # type: ignore[import]
@@ -14,13 +14,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
 from ..data.datasets.collate import coeff_collate, pad_collate, path_collate
-from ..models import (
-    Backbone,
-    ClassificationHead,
-    Head,
-    NCDEBackbone,
-    RegressionHead,
-)
+from ..models import Backbone, BatchOnDevice, ClassificationHead, Head, RegressionHead
 
 LOGGER = logging.getLogger(__name__)
 
@@ -51,56 +45,26 @@ def build_dataloader(cfg: DictConfig, dataset) -> DataLoader:
     )
 
 
-Batch = Dict[str, Tensor | Dict[str, Tensor]]
-
-
-def _move_to_device(obj, device: torch.device):
-    if isinstance(obj, Tensor):
-        return obj.to(device)
-    if isinstance(obj, dict):
-        return {key: _move_to_device(value, device) for key, value in obj.items()}
-    return obj
-
-
 def step(
     backbone: Backbone,
     head: Head,
-    batch: Batch,
+    batch: BatchOnDevice,
     criterion: nn.Module,
-    device: torch.device,
-) -> Tuple[Tensor, Tensor]:
-    batch = cast(Batch, _move_to_device(batch, device))
-    labels = cast(Tensor, batch["label"])
-
-    if isinstance(backbone, NCDEBackbone):
-        times = cast(Tensor, batch["times"])
-        initial = cast(Tensor, batch["initial"])
-        if "logsig" in batch:
-            backbone_input = {"times": times, "logsig": cast(Tensor, batch["logsig"]), "initial": initial}
-        else:
-            backbone_input = {
-                "times": times,
-                "coeffs": cast(Tensor, batch["coeffs"]),
-                "initial": initial,
-            }
-            if "mask" in batch:
-                backbone_input["mask"] = cast(Tensor, batch["mask"])
-        if "evaluation_times" in batch:
-            backbone_input["evaluation_times"] = cast(Tensor, batch["evaluation_times"])
-        backbone_out = backbone(backbone_input)
-    else:
-        if "values" not in batch:
-            raise KeyError("Batch must contain 'values' for non-NCDE backbones")
-        backbone_out = backbone(cast(Tensor, batch["values"]))
+) -> Tuple[Tensor, Tensor, Tensor]:
+    backbone_inputs = backbone.prepare_batch(batch)
+    backbone_out = backbone(backbone_inputs)
+    targets = head.prepare_batch(batch)
 
     if isinstance(head, ClassificationHead):
+        if backbone_out.pooled is None:
+            raise ValueError("Classification heads require pooled representations from the backbone")
         logits = head(backbone_out.pooled)
-        loss = criterion(logits, labels)
-        return loss, logits
+        loss = criterion(logits, targets)
+        return loss, logits, targets
     if isinstance(head, RegressionHead):
         preds = head(backbone_out.features)
-        loss = criterion(preds, labels)
-        return loss, preds
+        loss = criterion(preds, targets)
+        return loss, preds, targets
     raise TypeError(f"Unsupported head type: {type(head)!r}")
 
 
@@ -138,7 +102,8 @@ def train(cfg: DictConfig) -> None:
         state.epoch = epoch
         for batch_idx, batch in enumerate(train_loader):
             optimizer.zero_grad()
-            loss, outputs = step(backbone, head, batch, criterion, device)
+            batch_on_device = BatchOnDevice.from_batch(batch, device=device)
+            loss, outputs, _ = step(backbone, head, batch_on_device, criterion)
             loss.backward()
             optimizer.step()
             state.global_step += 1
@@ -167,12 +132,14 @@ def evaluate(
     total = 0
     with torch.no_grad():
         for batch in loader:
-            loss, outputs = step(backbone, head, batch, criterion, device)
-            total_loss += loss.item() * batch["label"].size(0)
-            total += batch["label"].size(0)
+            batch_on_device = BatchOnDevice.from_batch(batch, device=device)
+            loss, outputs, targets = step(backbone, head, batch_on_device, criterion)
+            batch_size = targets.size(0)
+            total_loss += loss.item() * batch_size
+            total += batch_size
             if isinstance(head, ClassificationHead):
                 preds = outputs.argmax(dim=-1)
-                correct += (preds == batch["label"].to(device)).sum().item()
+                correct += (preds == targets).sum().item()
     avg_loss = total_loss / max(total, 1)
     if isinstance(head, ClassificationHead):
         accuracy = correct / max(total, 1)

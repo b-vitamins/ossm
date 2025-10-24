@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-import numpy as np
 import torch
 from torch.utils.data import Dataset
 
@@ -45,8 +44,10 @@ class UEA(Dataset):
         resample_seed: Optional[int] = None,
         record_grid: bool = False,
         record_source: bool = False,
+        device: Optional[Union[str, torch.device]] = None,
     ) -> None:
         super().__init__()
+        self.device = torch.device(device) if device is not None else torch.device("cpu")
         self.root, self.name = root, name
         self.record_grid = bool(record_grid)
         self.record_source = bool(record_source)
@@ -81,44 +82,50 @@ class UEA(Dataset):
             times_tensor: Optional[torch.Tensor] = None
             if len(out) == 3:
                 times_np, values_np, labels_np = out
-                times_tensor = torch.as_tensor(times_np, dtype=torch.float32)
+                times_tensor = torch.as_tensor(
+                    times_np, dtype=torch.float32, device=self.device
+                )
             else:
                 values_np, labels_np = out
 
-            values = torch.as_tensor(values_np, dtype=torch.float32)
-            labels = utils.encode_labels(labels_np)
+            values = torch.as_tensor(values_np, dtype=torch.float32, device=self.device)
+            labels = utils.encode_labels(labels_np).to(device=self.device)
 
             if times_tensor is None:
                 N, T, _ = values.shape
-                base = torch.linspace(0.0, 1.0, T, dtype=torch.float32)
+                base = torch.linspace(
+                    0.0, 1.0, T, dtype=torch.float32, device=self.device
+                )
                 times_tensor = base.expand(N, T).clone()
 
             times_parts.append(times_tensor)
             values_parts.append(values)
             labels_parts.append(labels)
             split_labels.extend([base_split] * values.shape[0])
-            index_parts.append(torch.arange(values.shape[0], dtype=torch.long))
+            index_parts.append(
+                torch.arange(values.shape[0], dtype=torch.long, device=self.device)
+            )
 
         self.times = (
             torch.cat(times_parts, dim=0)
             if times_parts
-            else torch.empty((0, 0), dtype=torch.float32)
+            else torch.empty((0, 0), dtype=torch.float32, device=self.device)
         )
         self.values = (
             torch.cat(values_parts, dim=0)
             if values_parts
-            else torch.empty((0, 0, 0), dtype=torch.float32)
+            else torch.empty((0, 0, 0), dtype=torch.float32, device=self.device)
         )
         self.labels = (
             torch.cat(labels_parts, dim=0)
             if labels_parts
-            else torch.empty((0,), dtype=torch.long)
+            else torch.empty((0,), dtype=torch.long, device=self.device)
         )
         self._source_split_names = split_labels
         self._source_indices = (
             torch.cat(index_parts, dim=0)
             if index_parts
-            else torch.empty((0,), dtype=torch.long)
+            else torch.empty((0,), dtype=torch.long, device=self.device)
         )
 
         if deduplicate and self.values.numel():
@@ -177,6 +184,7 @@ class UEA(Dataset):
             sample["source_split"] = torch.tensor(
                 self._source_encoding[self._source_split_names[idx]],
                 dtype=torch.long,
+                device=self.device,
             )
         return self.transform(sample)
 
@@ -229,10 +237,10 @@ class UEA(Dataset):
             self.values = self.values.new_empty((0,) + self.values.shape[1:])
             self.labels = self.labels.new_empty((0,))
             self._source_split_names = []
-            self._source_indices = torch.empty(0, dtype=torch.long)
+            self._source_indices = torch.empty(0, dtype=torch.long, device=self.device)
             return
 
-        indices = indices.to(dtype=torch.long)
+        indices = indices.to(dtype=torch.long, device=self.device)
         self.times = self.times.index_select(0, indices)
         self.values = self.values.index_select(0, indices)
         self.labels = self.labels.index_select(0, indices)
@@ -240,12 +248,20 @@ class UEA(Dataset):
         self._source_split_names = [self._source_split_names[i] for i in indices.tolist()]
 
     def _deduplicate_indices(self) -> torch.Tensor:
-        flat_times = self.times.reshape(self.times.size(0), -1).cpu().numpy()
-        flat_values = self.values.reshape(self.values.size(0), -1).cpu().numpy()
-        signature = np.concatenate([flat_times, flat_values], axis=1)
-        _, keep = np.unique(signature, axis=0, return_index=True)
-        keep.sort()
-        return torch.as_tensor(keep, dtype=torch.long)
+        if self.times.numel() == 0:
+            return torch.empty(0, dtype=torch.long, device=self.device)
+
+        flat_times = torch.flatten(self.times, start_dim=1)
+        flat_values = torch.flatten(self.values, start_dim=1)
+        signature = torch.cat([flat_times, flat_values], dim=1)
+        _, inverse = torch.unique(signature, dim=0, return_inverse=True)
+        order = torch.argsort(inverse, stable=True)
+        sorted_inverse = inverse.index_select(0, order)
+        _, counts = torch.unique_consecutive(sorted_inverse, return_counts=True)
+        offsets = torch.cumsum(counts, dim=0) - counts
+        keep_sorted = order.index_select(0, offsets)
+        keep, _ = torch.sort(keep_sorted)
+        return keep.to(dtype=torch.long, device=self.device)
 
     def _build_resample_indices(
         self,
@@ -270,7 +286,9 @@ class UEA(Dataset):
             if sum(counts) != total:
                 raise ValueError("Sum of resample counts must equal dataset size")
         else:
-            weights = torch.tensor([float(v) for v in values], dtype=torch.float64)
+            weights = torch.tensor(
+                [float(v) for v in values], dtype=torch.float64, device=self.device
+            )
             if torch.any(weights <= 0):
                 raise ValueError("Resample proportions must be positive")
             weights = weights / weights.sum()
@@ -288,10 +306,10 @@ class UEA(Dataset):
             if sum(counts) != total:
                 counts[-1] += total - sum(counts)
 
-        generator = torch.Generator()
+        generator = torch.Generator(device=self.device)
         if seed is not None:
             generator.manual_seed(int(seed))
-        permutation = torch.randperm(total, generator=generator)
+        permutation = torch.randperm(total, generator=generator, device=self.device)
 
         out: Dict[str, torch.Tensor] = {}
         start = 0
@@ -305,7 +323,7 @@ class UEA(Dataset):
 
     def _select_indices(self, target: str) -> Optional[torch.Tensor]:
         if target == "all":
-            return torch.arange(self.values.size(0), dtype=torch.long)
+            return torch.arange(self.values.size(0), dtype=torch.long, device=self.device)
         if self._resampled_indices is not None:
             if target not in self._resampled_indices:
                 raise ValueError(
@@ -316,4 +334,4 @@ class UEA(Dataset):
         mask = [i for i, split in enumerate(self._source_split_names) if split == target]
         if not mask:
             raise ValueError(f"Split '{target}' has no samples under the current configuration")
-        return torch.as_tensor(mask, dtype=torch.long)
+        return torch.as_tensor(mask, dtype=torch.long, device=self.device)

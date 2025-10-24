@@ -21,6 +21,7 @@ from .s5 import S5Backbone, S5Block, S5Layer
 
 __all__: tuple[str, ...] = (
     "Backbone",
+    "BatchOnDevice",
     "Head",
     "SequenceBackboneOutput",
     "ClassificationHead",

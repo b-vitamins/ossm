@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence, Tuple, cast
+from typing import Dict, Mapping, Optional, Sequence, Tuple, cast
 
 import torch
 from torch import Tensor, nn
@@ -443,6 +443,49 @@ class NCDEBackbone(Backbone):
             )
         else:
             raise ValueError("mode must be 'ncde' or 'nrde'")
+
+    def prepare_batch(self, batch: Mapping[str, Tensor]) -> NCDEBatch:
+        times = batch.get("times")
+        if times is None or not isinstance(times, Tensor):
+            raise KeyError("Batch must contain 'times' tensor for NCDE backbones")
+
+        initial = batch.get("initial")
+        if initial is not None and not isinstance(initial, Tensor):
+            raise TypeError("'initial' entry must be a tensor if provided")
+
+        mask = batch.get("mask")
+        if mask is not None and not isinstance(mask, Tensor):
+            raise TypeError("'mask' entry must be a tensor if provided")
+
+        evaluation_times = batch.get("evaluation_times")
+        if evaluation_times is not None and not isinstance(evaluation_times, Tensor):
+            raise TypeError("'evaluation_times' entry must be a tensor if provided")
+
+        coeffs = batch.get("coeffs")
+        logsig = batch.get("logsig")
+        if self.mode == "ncde":
+            if coeffs is None or not isinstance(coeffs, Tensor):
+                raise KeyError("NCDE mode requires 'coeffs' in the batch")
+            if logsig is not None and not isinstance(logsig, Tensor):
+                raise TypeError("'logsig' entry must be a tensor if provided")
+            logsig_tensor: Optional[Tensor] = cast(Optional[Tensor], logsig)
+            coeffs_tensor = coeffs
+        else:
+            if logsig is None or not isinstance(logsig, Tensor):
+                raise KeyError("NRDE mode requires 'logsig' in the batch")
+            if coeffs is not None and not isinstance(coeffs, Tensor):
+                raise TypeError("'coeffs' entry must be a tensor if provided")
+            logsig_tensor = logsig
+            coeffs_tensor = cast(Optional[Tensor], coeffs)
+
+        return NCDEBatch(
+            times=times,
+            coeffs=coeffs_tensor,
+            logsig=logsig_tensor,
+            initial=cast(Optional[Tensor], initial),
+            mask=cast(Optional[Tensor], mask),
+            evaluation_times=cast(Optional[Tensor], evaluation_times),
+        )
 
     def forward(self, batch: NCDEBatch | Dict[str, Tensor]) -> SequenceBackboneOutput:
         if isinstance(batch, dict):
