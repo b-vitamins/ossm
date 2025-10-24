@@ -10,7 +10,7 @@ from torch import Tensor, nn
 from torch.autograd import Function
 
 from ._lru_scan import try_run_lru_scan
-from .base import Backbone, SequenceBackboneOutput
+from .base import Backbone, ResidualSSMBlock, SequenceBackboneOutput
 from .linoss import GatedLinearUnit
 
 __all__ = ["LRULayer", "LRUBlock", "LRUBackbone"]
@@ -181,7 +181,7 @@ class LRULayer(nn.Module):
         return projected + du
 
 
-class LRUBlock(nn.Module):
+class LRUBlock(ResidualSSMBlock):
     """LRU processing block with normalization, recurrence, GLU, and dropout."""
 
     def __init__(
@@ -194,30 +194,21 @@ class LRUBlock(nn.Module):
         r_max: float = 1.0,
         max_phase: float = 6.28,
     ) -> None:
-        super().__init__()
-        self.norm = nn.BatchNorm1d(hidden_dim, affine=False)
-        self.layer = LRULayer(
+        layer = LRULayer(
             ssm_size,
             hidden_dim,
             r_min=r_min,
             r_max=r_max,
             max_phase=max_phase,
         )
-        self.activation = nn.GELU()
-        self.glu = GatedLinearUnit(hidden_dim, hidden_dim)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, inputs: Tensor) -> Tensor:
-        if inputs.dim() != 3:
-            raise ValueError("LRUBlock expects input of shape (batch, length, hidden_dim).")
-        batch, length, hidden_dim = inputs.shape
-        residual = inputs
-        normed = self.norm(inputs.reshape(-1, hidden_dim)).reshape(batch, length, hidden_dim)
-        outputs = self.layer(normed)
-        outputs = self.dropout(self.activation(outputs))
-        outputs = self.glu(outputs)
-        outputs = self.dropout(outputs)
-        return outputs + residual
+        super().__init__(
+            hidden_dim,
+            layer=layer,
+            norm=nn.BatchNorm1d(hidden_dim, affine=False),
+            activation=nn.GELU(),
+            glu=GatedLinearUnit(hidden_dim, hidden_dim),
+            dropout=dropout,
+        )
 
 
 class LRUBackbone(Backbone):

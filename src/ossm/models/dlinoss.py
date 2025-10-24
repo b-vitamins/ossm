@@ -10,7 +10,7 @@ import torch
 from torch import Tensor, nn, autocast
 
 from ._dlinoss_scan import run_dlinoss_imex1
-from .base import Backbone, SequenceBackboneOutput
+from .base import Backbone, ResidualSSMBlock, SequenceBackboneOutput
 from .linoss import GatedLinearUnit
 
 __all__ = [
@@ -269,7 +269,7 @@ class DampedLinOSSLayer(nn.Module):
         return states.permute(1, 0, 2).contiguous()
 
 
-class DampedLinOSSBlock(nn.Module):
+class DampedLinOSSBlock(ResidualSSMBlock):
     """Processing block composed of norm, D-LinOSS layer, and GLU."""
 
     def __init__(
@@ -290,9 +290,7 @@ class DampedLinOSSBlock(nn.Module):
         dt_std: float = 0.5,
         dropout: float = 0.1,
     ) -> None:
-        super().__init__()
-        self.norm = nn.BatchNorm1d(hidden_dim, affine=False)
-        self.layer = DampedLinOSSLayer(
+        layer = DampedLinOSSLayer(
             ssm_size,
             hidden_dim,
             variant=variant,
@@ -307,21 +305,14 @@ class DampedLinOSSBlock(nn.Module):
             G_max=G_max,
             dt_std=dt_std,
         )
-        self.activation = nn.GELU()
-        self.glu = GatedLinearUnit(hidden_dim, hidden_dim)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, inputs: Tensor) -> Tensor:
-        if inputs.dim() != 3:
-            raise ValueError("DampedLinOSSBlock expects input of shape (batch, length, hidden_dim).")
-        batch, length, hidden_dim = inputs.shape
-        residual = inputs
-        normed = self.norm(inputs.reshape(-1, hidden_dim)).reshape(batch, length, hidden_dim)
-        outputs = self.layer(normed)
-        outputs = self.dropout(self.activation(outputs))
-        outputs = self.glu(outputs)
-        outputs = self.dropout(outputs)
-        return outputs + residual
+        super().__init__(
+            hidden_dim,
+            layer=layer,
+            norm=nn.BatchNorm1d(hidden_dim, affine=False),
+            activation=nn.GELU(),
+            glu=GatedLinearUnit(hidden_dim, hidden_dim),
+            dropout=dropout,
+        )
 
 
 class DampedLinOSSBackbone(Backbone):

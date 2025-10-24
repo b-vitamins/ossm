@@ -11,7 +11,7 @@ from torch import Tensor, nn
 from torch.autograd import Function
 
 from ._linoss_scan import try_run_scan
-from .base import Backbone, SequenceBackboneOutput
+from .base import Backbone, ResidualSSMBlock, SequenceBackboneOutput
 
 
 def _doubling_scan(a_matrix: Tensor, b_seq: Tensor) -> Tensor:
@@ -315,7 +315,7 @@ class LinOSSLayer(nn.Module):
         return states[..., 1]
 
 
-class LinOSSBlock(nn.Module):
+class LinOSSBlock(ResidualSSMBlock):
     """LinOSS processing block with normalization, LinOSS layer and GLU."""
 
     def __init__(
@@ -326,24 +326,15 @@ class LinOSSBlock(nn.Module):
         *,
         dropout: float = 0.05,
     ) -> None:
-        super().__init__()
-        self.norm = nn.BatchNorm1d(hidden_dim, affine=False)
-        self.layer = LinOSSLayer(ssm_size, hidden_dim, discretization)
-        self.activation = nn.GELU()
-        self.glu = GatedLinearUnit(hidden_dim, hidden_dim)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, inputs: Tensor) -> Tensor:
-        if inputs.dim() != 3:
-            raise ValueError("LinOSSBlock expects input of shape (batch, length, hidden_dim).")
-        batch, length, hidden_dim = inputs.shape
-        residual = inputs
-        normed = self.norm(inputs.reshape(-1, hidden_dim)).reshape(batch, length, hidden_dim)
-        outputs = self.layer(normed)
-        outputs = self.dropout(self.activation(outputs))
-        outputs = self.glu(outputs)
-        outputs = self.dropout(outputs)
-        return outputs + residual
+        layer = LinOSSLayer(ssm_size, hidden_dim, discretization)
+        super().__init__(
+            hidden_dim,
+            layer=layer,
+            norm=nn.BatchNorm1d(hidden_dim, affine=False),
+            activation=nn.GELU(),
+            glu=GatedLinearUnit(hidden_dim, hidden_dim),
+            dropout=dropout,
+        )
 
 
 class LinOSSBackbone(Backbone):

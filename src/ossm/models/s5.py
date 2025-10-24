@@ -10,7 +10,7 @@ from torch import Tensor, nn
 from torch.autograd import Function
 
 from ._s5_scan import try_run_s5_scan
-from .base import Backbone, SequenceBackboneOutput
+from .base import Backbone, ResidualSSMBlock, SequenceBackboneOutput
 from .linoss import GatedLinearUnit
 
 __all__ = ["S5Layer", "S5Block", "S5Backbone"]
@@ -304,7 +304,7 @@ class S5Layer(nn.Module):
         return projected + du
 
 
-class S5Block(nn.Module):
+class S5Block(ResidualSSMBlock):
     """S5 processing block with normalization, S5 layer and GLU."""
 
     def __init__(
@@ -322,9 +322,7 @@ class S5Block(nn.Module):
         step_rescale: float = 1.0,
         dropout: float = 0.05,
     ) -> None:
-        super().__init__()
-        self.norm = nn.BatchNorm1d(hidden_dim, affine=False)
-        self.layer = S5Layer(
+        layer = S5Layer(
             ssm_size,
             hidden_dim,
             blocks=blocks,
@@ -336,21 +334,14 @@ class S5Block(nn.Module):
             dt_max=dt_max,
             step_rescale=step_rescale,
         )
-        self.activation = nn.GELU()
-        self.glu = GatedLinearUnit(hidden_dim, hidden_dim)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, inputs: Tensor) -> Tensor:
-        if inputs.dim() != 3:
-            raise ValueError("S5Block expects input of shape (batch, length, hidden_dim).")
-        batch, length, hidden = inputs.shape
-        residual = inputs
-        normed = self.norm(inputs.reshape(-1, hidden)).reshape(batch, length, hidden)
-        outputs = self.layer(normed)
-        outputs = self.dropout(self.activation(outputs))
-        outputs = self.glu(outputs)
-        outputs = self.dropout(outputs)
-        return outputs + residual
+        super().__init__(
+            hidden_dim,
+            layer=layer,
+            norm=nn.BatchNorm1d(hidden_dim, affine=False),
+            activation=nn.GELU(),
+            glu=GatedLinearUnit(hidden_dim, hidden_dim),
+            dropout=dropout,
+        )
 
 
 class S5Backbone(Backbone):
