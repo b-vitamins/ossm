@@ -5,7 +5,10 @@ from __future__ import annotations
 import pytest
 import torch
 import torchcde
+from torch import nn
+
 from ossm.models import NCDEBackbone, NCDELayer, NRDELayer
+from ossm.models.ncde import _ScaledMLP
 
 
 def _natural_coeffs(path: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
@@ -27,6 +30,40 @@ def _make_zero_ncde_layer(input_dim: int, hidden_dim: int) -> NCDELayer:
         for param in layer.vector_field.parameters():
             param.zero_()
     return layer
+
+
+def test_scaled_mlp_reset_parameters_scales_layers() -> None:
+    seed = 1234
+    torch.manual_seed(seed)
+    base = _ScaledMLP(
+        in_dim=3,
+        out_dim=2,
+        hidden_width=5,
+        depth=2,
+        activation="relu",
+        final_activation=None,
+        scale=1.0,
+    )
+    torch.manual_seed(seed)
+    scaled = _ScaledMLP(
+        in_dim=3,
+        out_dim=2,
+        hidden_width=5,
+        depth=2,
+        activation="relu",
+        final_activation=None,
+        scale=2.5,
+    )
+
+    scale = scaled.scale
+    base_linears = [module for module in base.hidden if isinstance(module, nn.Linear)] + [base.output]
+    scaled_linears = [module for module in scaled.hidden if isinstance(module, nn.Linear)] + [scaled.output]
+
+    assert len(base_linears) == len(scaled_linears)
+    for base_layer, scaled_layer in zip(base_linears, scaled_linears):
+        torch.testing.assert_close(scaled_layer.weight, base_layer.weight / scale)
+        if base_layer.bias is not None and scaled_layer.bias is not None:
+            torch.testing.assert_close(scaled_layer.bias, base_layer.bias / scale)
 
 
 def test_ncde_layer_constant_solution() -> None:
