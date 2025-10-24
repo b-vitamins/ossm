@@ -1,7 +1,10 @@
 from __future__ import annotations
+
 import importlib
+
 import pytest
 import torch
+
 from ossm.data.transforms.signature import ToWindowedLogSignature
 
 ts_spec = importlib.util.find_spec("torchsignature")
@@ -72,3 +75,69 @@ def test_hall_basis_matches_manual():
     expected = torch.stack(feats)
     assert expected.shape == out["features"].shape
     assert torch.allclose(expected, out["features"], atol=1e-5)
+
+
+@pytest.mark.skipif(ts_spec is None, reason="torchsignature not installed")
+def test_hall_basis_batched_shapes_and_dtype():
+    batch = 4
+    steps = 6
+    channels = 5
+    length = 19
+    values = torch.randn(batch, length, channels, dtype=torch.float64)
+    times = torch.linspace(0, 1, length)
+    sample = {"times": times, "values": values, "label": torch.arange(batch)}
+
+    tfm = ToWindowedLogSignature(depth=2, steps=steps, basis="hall")
+    out = tfm(sample)
+
+    feats = out["features"]
+    assert feats.dtype == torch.float64
+    assert feats.shape[0] == batch
+
+    total_points = length + 1  # account for inserted basepoint
+    remainder = total_points % steps
+    expected_windows = (total_points // steps) + (1 if remainder else 0)
+    expected_dim = 1 + channels + (channels * (channels - 1)) // 2
+
+    assert feats.shape[1] == expected_windows
+    assert feats.shape[2] == expected_dim
+
+
+@pytest.mark.skipif(ts_spec is None, reason="torchsignature not installed")
+def test_windowed_logsig_batched_default_basis_shape():
+    batch = 3
+    steps = 4
+    channels = 2
+    length = 15
+    values = torch.randn(batch, length, channels)
+    sample = {"times": torch.linspace(0, 1, length), "values": values}
+
+    tfm = ToWindowedLogSignature(depth=2, steps=steps, basis="lyndon")
+    out = tfm(sample)
+
+    feats = out["features"]
+    assert feats.shape[0] == batch
+    total_points = length + 1
+    remainder = total_points % steps
+    expected_windows = (total_points // steps) + (1 if remainder else 0)
+    assert feats.shape[1] == expected_windows
+    assert feats.dtype == values.dtype
+
+
+def test_missing_torchsignature_warns_and_returns_sample(monkeypatch, caplog):
+    from ossm.data.transforms import signature as signature_mod
+
+    monkeypatch.setattr(
+        signature_mod, "_TORCHSIGNATURE_BACKEND", signature_mod.TorchSignatureBackend()
+    )
+    monkeypatch.setattr(
+        "ossm.data.transforms.signature.importlib.util.find_spec", lambda _: None
+    )
+    tfm = ToWindowedLogSignature(depth=2, steps=8, basis="hall")
+    sample = {"values": torch.randn(7, 3)}
+
+    with caplog.at_level("WARNING"):
+        out = tfm(sample)
+
+    assert out is sample
+    assert any("torchsignature is not available" in rec.message for rec in caplog.records)
