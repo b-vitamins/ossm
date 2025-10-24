@@ -5,6 +5,7 @@ from typing import cast
 
 import torch
 
+from .batch_utils import new_batch_zeros, pad_sequence_batch
 from ..transforms.compose import TimeSeriesSample
 
 
@@ -12,6 +13,9 @@ def pad_collate(batch: Sequence[TimeSeriesSample]) -> TimeSeriesSample:
     if not batch:
         raise ValueError("batch must contain at least one sample")
 
+    values_batch = []
+    times_batch = []
+    labels = []
     lengths = []
     for sample in batch:
         values = sample.get("values")
@@ -19,29 +23,17 @@ def pad_collate(batch: Sequence[TimeSeriesSample]) -> TimeSeriesSample:
         label = sample.get("label")
         if values is None or times is None or label is None:
             raise KeyError("pad_collate requires 'values', 'times', and 'label'")
+        values_batch.append(values)
+        times_batch.append(times)
+        labels.append(label)
         lengths.append(values.size(0))
 
-    Tm = max(lengths)
-    batch_size = len(batch)
-    channels = batch[0].get("values")
-    times_template = batch[0].get("times")
-    if channels is None or times_template is None:
-        raise KeyError("pad_collate requires 'values' and 'times'")
-    values = torch.zeros(batch_size, Tm, channels.size(-1), dtype=channels.dtype)
-    times = torch.zeros(batch_size, Tm, dtype=times_template.dtype)
-    mask = torch.zeros(batch_size, Tm, dtype=torch.bool)
-    labels = []
-    for i, sample in enumerate(batch):
-        values_tensor = sample.get("values")
-        times_tensor = sample.get("times")
-        label_tensor = sample.get("label")
-        if values_tensor is None or times_tensor is None or label_tensor is None:
-            raise KeyError("pad_collate requires 'values', 'times', and 'label'")
-        length = values_tensor.size(0)
-        values[i, :length] = values_tensor
-        times[i, :length] = times_tensor
-        mask[i, :length] = True
-        labels.append(label_tensor)
+    values, mask = pad_sequence_batch(values_batch, lengths=lengths)
+    times, _ = pad_sequence_batch(
+        times_batch,
+        lengths=lengths,
+        create_mask=False,
+    )
     return cast(
         TimeSeriesSample,
         {
@@ -57,49 +49,55 @@ def path_collate(batch: Sequence[TimeSeriesSample]) -> TimeSeriesSample:
     if not batch:
         raise ValueError("batch must contain at least one sample")
 
+    features_batch = []
+    labels = []
     segment_lengths = []
     for sample in batch:
         features = sample.get("features")
         label = sample.get("label")
         if features is None or label is None:
             raise KeyError("path_collate requires 'features' and 'label'")
+        features_batch.append(features)
+        labels.append(label)
         segment_lengths.append(features.size(0))
 
-    segments_max = max(segment_lengths)
-    batch_size = len(batch)
-    first_features = batch[0].get("features")
-    if first_features is None:
-        raise KeyError("path_collate requires 'features'")
-    feature_dim = first_features.size(-1)
+    logsig, _ = pad_sequence_batch(features_batch, lengths=segment_lengths, create_mask=False)
 
-    logsig = torch.zeros(batch_size, segments_max, feature_dim, dtype=first_features.dtype)
-    first_values = batch[0].get("values")
-    if first_values is not None:
-        init_dim = first_values.size(-1)
-        init_dtype = first_values.dtype
-    else:
-        init_dim = feature_dim
-        init_dtype = first_features.dtype
-    initials = torch.zeros(batch_size, init_dim, dtype=init_dtype)
-    labels = []
-    for i, sample in enumerate(batch):
-        features = sample.get("features")
-        label = sample.get("label")
-        if features is None or label is None:
-            raise KeyError("path_collate requires 'features' and 'label'")
-        segments = features.size(0)
-        logsig[i, :segments] = features
+    initial_template = None
+    for sample in batch:
         values_tensor = sample.get("values")
         if values_tensor is not None:
-            initials[i] = values_tensor[0]
-        labels.append(label)
+            initial_template = values_tensor[0]
+            break
+
+    if initial_template is None:
+        initial_template = features_batch[0][0]
+
+    initial_template = initial_template.reshape(-1)
+
+    initials = new_batch_zeros(initial_template, (len(batch), initial_template.size(-1)))
+
+    for idx, sample in enumerate(batch):
+        values_tensor = sample.get("values")
+        if values_tensor is not None:
+            initials[idx] = values_tensor[0].reshape(-1).to(
+                dtype=initials.dtype, device=initials.device
+            )
 
     times_template = batch[0].get("times")
     if times_template is not None:
         time_dtype = times_template.dtype
+        time_device = times_template.device
     else:
-        time_dtype = first_features.dtype
-    times = torch.linspace(0.0, 1.0, segments_max + 1, dtype=time_dtype)
+        time_dtype = logsig.dtype
+        time_device = logsig.device
+    times = torch.linspace(
+        0.0,
+        1.0,
+        logsig.size(1) + 1,
+        dtype=time_dtype,
+        device=time_device,
+    )
 
     return cast(
         TimeSeriesSample,
@@ -117,72 +115,74 @@ def coeff_collate(batch: Sequence[TimeSeriesSample]) -> TimeSeriesSample:
     if not batch:
         raise ValueError("batch must contain at least one sample")
 
-    lengths = []
+    time_batch = []
+    coeff_batch = []
+    labels = []
+    time_lengths = []
     coeff_lengths = []
+
     for sample in batch:
         times = sample.get("times")
         coeffs_tensor = sample.get("coeffs")
         label = sample.get("label")
         if times is None or coeffs_tensor is None or label is None:
             raise KeyError("coeff_collate requires 'times', 'coeffs', and 'label'")
-        lengths.append(times.size(0))
+        time_batch.append(times)
+        coeff_batch.append(coeffs_tensor)
+        labels.append(label)
+        time_lengths.append(times.size(0))
         coeff_lengths.append(coeffs_tensor.size(0))
 
-    Tm = max(lengths)
-    Km = max(coeff_lengths)
-    batch_size = len(batch)
+    times, mask = pad_sequence_batch(time_batch, lengths=time_lengths)
 
-    sample_times = batch[0].get("times")
-    if sample_times is None:
-        raise KeyError("coeff_collate requires 'times'")
-    times = sample_times.new_zeros((batch_size, Tm))
-    mask = torch.zeros(batch_size, Tm, dtype=torch.bool, device=sample_times.device)
-
-    sample_coeffs = batch[0].get("coeffs")
-    if sample_coeffs is None:
-        raise KeyError("coeff_collate requires 'coeffs'")
+    sample_coeffs = coeff_batch[0]
     if sample_coeffs.ndim == 2:
         flat_dim = sample_coeffs.size(-1)
-        coeffs = sample_coeffs.new_zeros((batch_size, Km, flat_dim))
         channel_dim = flat_dim // 4
     elif sample_coeffs.ndim == 3:
-        channels = sample_coeffs.size(1)
-        order = sample_coeffs.size(2)
-        coeffs = sample_coeffs.new_zeros((batch_size, Km, channels, order))
-        channel_dim = channels
+        channel_dim = sample_coeffs.size(1)
     else:
         raise ValueError("coeffs must be rank-2 or rank-3 tensors")
 
-    initial_template = batch[0].get("initial")
-    if initial_template is None:
-        values_template = batch[0].get("values")
-        if values_template is None:
-            raise KeyError("coeff_collate requires 'initial' or 'values'")
-        initial_template = values_template[0]
-    initials = initial_template.new_zeros((batch_size, channel_dim))
+    coeffs, _ = pad_sequence_batch(
+        coeff_batch,
+        lengths=coeff_lengths,
+        create_mask=False,
+    )
 
-    labels = []
-
-    for i, sample in enumerate(batch):
-        times_tensor = sample.get("times")
-        coeffs_tensor = sample.get("coeffs")
-        label_tensor = sample.get("label")
-        if times_tensor is None or coeffs_tensor is None or label_tensor is None:
-            raise KeyError("coeff_collate requires 'times', 'coeffs', and 'label'")
-        t = times_tensor.size(0)
-        k = coeffs_tensor.size(0)
-        times[i, :t] = times_tensor
-        coeffs[i, :k] = coeffs_tensor
-        mask[i, :t] = True
+    initial_template = None
+    for sample in batch:
         initial = sample.get("initial")
         if initial is not None:
-            initials[i] = initial
+            initial_template = initial
+            break
+        values_tensor = sample.get("values")
+        if values_tensor is not None:
+            initial_template = values_tensor[0]
+            break
+
+    if initial_template is None:
+        raise KeyError("coeff_collate requires 'initial' or 'values'")
+
+    initial_template = initial_template.reshape(-1)
+
+    initials = new_batch_zeros(initial_template, (len(batch), initial_template.size(-1)))
+
+    for idx, sample in enumerate(batch):
+        initial = sample.get("initial")
+        if initial is not None:
+            initials[idx] = initial.reshape(-1).to(
+                dtype=initials.dtype, device=initials.device
+            )
         else:
             values_tensor = sample.get("values")
             if values_tensor is None:
-                raise KeyError("coeff_collate requires 'values' when 'initial' is absent")
-            initials[i] = values_tensor[0]
-        labels.append(label_tensor)
+                raise KeyError(
+                    "coeff_collate requires 'values' when 'initial' is absent"
+                )
+            initials[idx] = values_tensor[0].reshape(-1).to(
+                dtype=initials.dtype, device=initials.device
+            )
 
     return cast(
         TimeSeriesSample,
