@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 import torch
-import torchcde
+
 from ossm.models import NCDEBackbone, NCDELayer, NRDELayer
 
 
 def _natural_coeffs(path: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
     if path.dim() != 3:
         raise ValueError("path must have shape (batch, length, channels)")
+    torchcde = pytest.importorskip("torchcde")
     return torchcde.natural_cubic_coeffs(path, t=times)
 
 
@@ -135,4 +138,25 @@ def test_ncde_layer_cuda_matches_cpu() -> None:
 
     torch.testing.assert_close(features_gpu.cpu(), features_cpu, atol=1e-5, rtol=1e-5)
     torch.testing.assert_close(final_gpu.cpu(), final_cpu, atol=1e-5, rtol=1e-5)
+
+
+def test_ncde_layer_missing_torchcde(monkeypatch) -> None:
+    from ossm.models import ncde as ncde_mod
+
+    original_import_module = importlib.import_module
+
+    def fake_import(name: str, *args, **kwargs):
+        if name == "torchcde":
+            raise ModuleNotFoundError("No module named 'torchcde'")
+        return original_import_module(name, *args, **kwargs)
+
+    monkeypatch.setattr(ncde_mod.importlib, "import_module", fake_import)
+
+    layer = NCDELayer(input_dim=2, hidden_dim=3, vf_width=4, vf_depth=1)
+    times = torch.tensor([0.0, 1.0, 2.0], dtype=torch.float32)
+    coeffs = torch.zeros(1, times.numel() - 1, 4 * layer.input_dim)
+    initial = torch.zeros(1, layer.input_dim)
+
+    with pytest.raises(RuntimeError, match="torchcde is required for Neural CDE support"):
+        layer(times, coeffs, initial)
 
