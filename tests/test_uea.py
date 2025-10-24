@@ -106,6 +106,30 @@ def test_uea_deduplicate_across_splits(monkeypatch):
     assert ("test", 1) in sources
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_uea_deduplicate_cuda(monkeypatch):
+    monkeypatch.setattr(utils, "load_uea_numpy", _loader_with_times)
+
+    ds = UEA(
+        root=".",
+        name="Dummy",
+        split="all",
+        view="raw",
+        deduplicate=True,
+        device="cuda",
+    )
+
+    assert len(ds) == 5
+    assert ds.times.device.type == "cuda"
+    assert ds.values.device.type == "cuda"
+    assert ds.labels.device.type == "cuda"
+
+    sample = ds[0]
+    assert sample["times"].device.type == "cuda"
+    assert sample["values"].device.type == "cuda"
+    assert sample["label"].device.type == "cuda"
+
+
 def test_uea_resample_partition(monkeypatch):
     monkeypatch.setattr(utils, "load_uea_numpy", _fake_loader)
     resample_cfg = {"train": 6, "val": 3, "test": 3}
