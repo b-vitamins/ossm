@@ -1,6 +1,3 @@
-import torch
-import pytest
-
 import pytest
 import torch
 
