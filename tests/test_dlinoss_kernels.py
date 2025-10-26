@@ -4,12 +4,12 @@ from unittest import mock
 import pytest
 import torch
 
+from ossm.models import _dlinoss_scan
+from ossm.models.dlinoss import DampedLinOSSLayer
+
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Torchinductor does not support code generation for complex operators:UserWarning"
 )
-
-from ossm.models import _dlinoss_scan
-from ossm.models.dlinoss import DampedLinOSSLayer
 
 VARIANTS = ("imex1", "imex2", "im", "ex")
 DTYPE_CASES = (

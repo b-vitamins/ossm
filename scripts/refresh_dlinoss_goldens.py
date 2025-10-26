@@ -35,7 +35,6 @@ class SharedParameters:
 
 def _compute_a_bounds(step: jnp.ndarray, g_diag: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
     denom = jnp.maximum(step**2, 1e-6)
-    one = jnp.ones_like(step)
 
     low_imex1 = (2.0 + step * g_diag - 2.0 * jnp.sqrt(1.0 + step * g_diag)) / denom
     high_imex1 = (2.0 + step * g_diag + 2.0 * jnp.sqrt(1.0 + step * g_diag)) / denom
@@ -275,7 +274,14 @@ def _validate_with_upstream(
 
         logit_step = logit(step).astype(dtype)
         layer = eqx.tree_at(
-            lambda l: (l.A_diag, l.G_diag, l.dt, l.B, l.C, l.D),
+            lambda layer_obj: (
+                layer_obj.A_diag,
+                layer_obj.G_diag,
+                layer_obj.dt,
+                layer_obj.B,
+                layer_obj.C,
+                layer_obj.D,
+            ),
             layer,
             (a, g, logit_step, b, c, d_vec),
         )
@@ -340,18 +346,19 @@ def generate_reference_cases(
                 variant, a, g, step, b, c, d_vec, inputs
             )
 
-            loss_fn = lambda a_v, g_v, step_v, b_r, b_i, c_r, c_i, d_v: _loss_for_gradients(
-                variant,
-                a_v,
-                g_v,
-                step_v,
-                b_r,
-                b_i,
-                c_r,
-                c_i,
-                d_v,
-                inputs,
-            )
+            def loss_fn(a_v, g_v, step_v, b_r, b_i, c_r, c_i, d_v):
+                return _loss_for_gradients(
+                    variant,
+                    a_v,
+                    g_v,
+                    step_v,
+                    b_r,
+                    b_i,
+                    c_r,
+                    c_i,
+                    d_v,
+                    inputs,
+                )
             grad_fn = jax.value_and_grad(
                 loss_fn, argnums=(0, 1, 2, 3, 4, 5, 6, 7)
             )
