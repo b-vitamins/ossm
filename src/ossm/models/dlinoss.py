@@ -9,7 +9,7 @@ from typing import Tuple
 import torch
 from torch import Tensor, nn, autocast
 
-from ._dlinoss_scan import run_dlinoss_imex1
+from ._dlinoss_scan import run_dlinoss
 from .base import Backbone, ResidualSSMBlock, SequenceBackboneOutput
 from .linoss import GatedLinearUnit
 
@@ -18,6 +18,9 @@ __all__ = [
     "DampedLinOSSBlock",
     "DampedLinOSSBackbone",
 ]
+
+
+_VALID_VARIANTS: Tuple[str, ...] = ("imex1", "imex2", "im", "ex")
 
 
 @dataclass
@@ -66,8 +69,11 @@ class DampedLinOSSLayer(nn.Module):
     ) -> None:
         super().__init__()
         variant = variant.lower()
-        if variant != "imex1":
-            raise ValueError("Only the 'imex1' damped LinOSS variant is supported.")
+        if variant not in _VALID_VARIANTS:
+            raise ValueError(
+                "DampedLinOSSLayer received unsupported variant "
+                f"'{variant}'. Expected one of {', '.join(_VALID_VARIANTS)}."
+            )
         self.variant = variant
         self.ssm_size = ssm_size
         self.hidden_dim = hidden_dim
@@ -221,7 +227,8 @@ class DampedLinOSSLayer(nn.Module):
 
         # Run the scan in fp32/complex64 regardless of surrounding dtype
         with autocast("cuda", enabled=False):
-            outputs_complex = self._apply_damped_imex1(
+            outputs_complex = self._apply_dlinoss(
+                self.variant,
                 a_diag.to(dtype=scan_real_dtype),
                 g_diag.to(dtype=scan_real_dtype),
                 step.to(dtype=scan_real_dtype),
@@ -259,13 +266,15 @@ class DampedLinOSSLayer(nn.Module):
 
         return a_diag, g_diag, step
 
-    def _apply_damped_imex1(self, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Tensor) -> Tensor:
+    def _apply_dlinoss(
+        self, variant: str, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Tensor
+    ) -> Tensor:
         batch, length, _ = bu.shape
         if length == 0:
             return bu.new_zeros(batch, 0, self.ssm_size)
 
         bu_seq = bu.permute(1, 0, 2).contiguous()
-        states = run_dlinoss_imex1(a_diag, g_diag, step, bu_seq)
+        states = run_dlinoss(variant, a_diag, g_diag, step, bu_seq)
         return states.permute(1, 0, 2).contiguous()
 
 
@@ -313,6 +322,7 @@ class DampedLinOSSBlock(ResidualSSMBlock):
             glu=GatedLinearUnit(hidden_dim, hidden_dim),
             dropout=dropout,
         )
+        self.variant = variant
 
 
 class DampedLinOSSBackbone(Backbone):
@@ -341,6 +351,7 @@ class DampedLinOSSBackbone(Backbone):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
+        self.variant = variant
         self.encoder = nn.Linear(input_dim, hidden_dim)
         self.blocks = nn.ModuleList(
             [

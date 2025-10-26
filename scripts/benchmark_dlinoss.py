@@ -139,7 +139,7 @@ def _measure_jax(jax_layer: JaxDampedIMEX1Layer, inputs: jnp.ndarray) -> tuple[f
 
 
 def main() -> None:
-    if not has_kernels():
+    if not has_kernels("imex1"):
         error = extension_error()
         details = f"\nLast extension error: {error}" if error is not None else ""
         raise RuntimeError(
