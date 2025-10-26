@@ -22,20 +22,26 @@ def _manual_block_forward(block: torch.nn.Module, inputs: torch.Tensor) -> torch
     return outputs + inputs
 
 
+DLINOSS_VARIANTS = ("imex1", "imex2", "im", "ex")
+
+
 @pytest.mark.parametrize(
     ("block", "shape"),
     [
         (LinOSSBlock(ssm_size=2, hidden_dim=4, discretization="IM"), (2, 3, 4)),
-        (
-            DampedLinOSSBlock(
-                ssm_size=2,
-                hidden_dim=4,
-                variant="imex1",
-                initialization="ring",
-                dropout=0.1,
-            ),
-            (2, 3, 4),
-        ),
+        *[
+            (
+                DampedLinOSSBlock(
+                    ssm_size=2,
+                    hidden_dim=4,
+                    variant=variant,
+                    initialization="ring",
+                    dropout=0.1,
+                ),
+                (2, 3, 4),
+            )
+            for variant in DLINOSS_VARIANTS
+        ],
         (LRUBlock(ssm_size=2, hidden_dim=4, dropout=0.2), (2, 3, 4)),
         (
             S5Block(

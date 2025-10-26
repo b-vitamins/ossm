@@ -21,6 +21,42 @@ std::vector<at::Tensor> dlinoss_imex1_backward(const at::Tensor& a_diag,
                                                const at::Tensor& states,
                                                const at::Tensor& grad_output);
 
+torch::Tensor dlinoss_im_forward(const at::Tensor& a_diag,
+                                 const at::Tensor& g_diag,
+                                 const at::Tensor& step,
+                                 const at::Tensor& bu);
+
+std::vector<at::Tensor> dlinoss_im_backward(const at::Tensor& a_diag,
+                                            const at::Tensor& g_diag,
+                                            const at::Tensor& step,
+                                            const at::Tensor& bu,
+                                            const at::Tensor& states,
+                                            const at::Tensor& grad_output);
+
+torch::Tensor dlinoss_ex_forward(const at::Tensor& a_diag,
+                                 const at::Tensor& g_diag,
+                                 const at::Tensor& step,
+                                 const at::Tensor& bu);
+
+std::vector<at::Tensor> dlinoss_ex_backward(const at::Tensor& a_diag,
+                                            const at::Tensor& g_diag,
+                                            const at::Tensor& step,
+                                            const at::Tensor& bu,
+                                            const at::Tensor& states,
+                                            const at::Tensor& grad_output);
+
+torch::Tensor dlinoss_imex2_forward(const at::Tensor& a_diag,
+                                    const at::Tensor& g_diag,
+                                    const at::Tensor& step,
+                                    const at::Tensor& bu);
+
+std::vector<at::Tensor> dlinoss_imex2_backward(const at::Tensor& a_diag,
+                                               const at::Tensor& g_diag,
+                                               const at::Tensor& step,
+                                               const at::Tensor& bu,
+                                               const at::Tensor& states,
+                                               const at::Tensor& grad_output);
+
 at::Tensor lru_scan(const at::Tensor& lambda_real,
                     const at::Tensor& lambda_imag,
                     const at::Tensor& b_seq);
@@ -75,6 +111,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("linoss_scan", &ossm::linoss_scan, "LinOSS associative scan kernel");
   m.def("dlinoss_imex1_forward", &ossm::dlinoss_imex1_forward, "D-LinOSS IMEX1 forward kernel");
   m.def("dlinoss_imex1_backward", &ossm::dlinoss_imex1_backward, "D-LinOSS IMEX1 backward kernel");
+  m.def("dlinoss_im_forward", &ossm::dlinoss_im_forward, "D-LinOSS IM forward kernel");
+  m.def("dlinoss_im_backward", &ossm::dlinoss_im_backward, "D-LinOSS IM backward kernel");
+  m.def("dlinoss_ex_forward", &ossm::dlinoss_ex_forward, "D-LinOSS EX forward kernel");
+  m.def("dlinoss_ex_backward", &ossm::dlinoss_ex_backward, "D-LinOSS EX backward kernel");
+  m.def("dlinoss_imex2_forward", &ossm::dlinoss_imex2_forward, "D-LinOSS IMEX2 forward kernel");
+  m.def("dlinoss_imex2_backward", &ossm::dlinoss_imex2_backward, "D-LinOSS IMEX2 backward kernel");
   m.def("lru_scan", &ossm::lru_scan, "LRU associative scan kernel");
   m.def("linear_rnn_scan", &ossm::linear_rnn_scan, "Linear RNN scan kernel");
   m.def("s5_scan", &ossm::s5_scan, "S5 associative scan kernel");

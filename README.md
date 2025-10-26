@@ -194,7 +194,7 @@ at the configured evaluation interval.
 are grouped by intent:
 
 - **Model & task**: `--backbone`, `--head`, `--task`, `--hidden-dim`,
-  `--ssm-size`, `--num-blocks`.
+  `--ssm-size`, `--num-blocks`, `--discretization` (for D-LinOSS variants).
 - **Dataset**: `--dataset-name`, `--dataset-view`, `--train-split`,
   `--val-name`, `--test-name`, `--window-steps`, `--window-depth`,
   `--logsig-basis`, `--record-grid`, `--record-source`, `--download`.
@@ -207,8 +207,9 @@ are grouped by intent:
 - **Runtime**: `--device`, `--seed`, `--work-dir`, `--dataset-root`.
 
 The CLI surfaces everything needed for the sequential recommender as well—use
-`--task seqrec` alongside `--model dlinossrec --head tiedsoftmax`—but you can
-still fall back to Hydra overrides for niche adjustments:
+`--task seqrec` alongside `--model dlinossrec --head tiedsoftmax` and toggle the
+SSM discretization via `--discretization`—but you can still fall back to Hydra
+overrides for niche adjustments:
 
 ```bash
 python train.py training.max_steps=5000 model.params.hidden_dim=256
@@ -275,6 +276,7 @@ and can be reproduced on CPU (for smoke tests) or GPU (for full-scale runs).
      --task seqrec \
      --model dlinossrec \
      --head tiedsoftmax \
+     --discretization imex2 \
      --dataset-name amazonbeauty \
      --device cpu \
      --epochs 2 \

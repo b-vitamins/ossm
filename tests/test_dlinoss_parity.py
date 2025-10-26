@@ -1,99 +1,138 @@
+from __future__ import annotations
+
+import json
+from functools import lru_cache
+from pathlib import Path
+
+import pytest
 import torch
 
+from ossm.models._dlinoss_scan import _reference_dlinoss_states
 from ossm.models.dlinoss import DampedLinOSSLayer
 
-REFERENCE_DLINOSS = {
-    "A_diag": torch.tensor([13.148539543151855, 1.6218369007110596, 12.797510147094727, 3.283543825149536]),
-    "G_diag": torch.tensor([0.2862105965614319, 0.46147987246513367, 0.13841426372528076, 0.28535041213035583]),
-    "steps": torch.tensor([0.07946278899908066, -0.026646547973155975, 0.07436224818229675, 0.7722328305244446]),
-    "B": torch.tensor(
-        [
-            [
-                [0.3472733795642853, 0.401248961687088],
-                [0.3854807913303375, -0.32831400632858276],
-                [-0.052348051220178604, -0.3220369517803192],
-                [0.34229776263237, -0.2627905309200287],
-                [-0.2914426326751709, 0.19438061118125916],
-                [0.11009243130683899, 0.36285898089408875],
-            ],
-            [
-                [-0.13463613390922546, 0.061356041580438614],
-                [0.14250043034553528, 0.10787466168403625],
-                [0.1110144555568695, -0.1648869663476944],
-                [0.3973172605037689, -0.20672032237052917],
-                [-0.3841327130794525, 0.20805010199546814],
-                [-0.3314173221588135, 0.25276854634284973],
-            ],
-            [
-                [-0.4078983664512634, 0.09914436936378479],
-                [-0.3701769709587097, -0.12262630462646484],
-                [-0.20810061693191528, 0.36157605051994324],
-                [0.09413287043571472, -0.2072651982307434],
-                [0.1769627034664154, 0.11249127984046936],
-                [0.044880688190460205, 0.3921422064304352],
-            ],
-            [
-                [0.31420251727104187, -0.030165940523147583],
-                [-0.09156284481287003, -0.3852744400501251],
-                [0.3647609055042267, -0.14107975363731384],
-                [0.03420772776007652, 0.37296226620674133],
-                [0.006422006592154503, 0.1632528007030487],
-                [0.0750468447804451, -0.18913616240024567],
-            ],
-        ]
-    ),
-    "C": torch.tensor(
-        [
-            [[-0.10550057888031006, 0.31744837760925293], [-0.250848650932312, 0.38087308406829834], [-0.2097381353378296, -0.2747894525527954], [-0.2994356155395508, 0.3469862937927246]],
-            [[-0.47400641441345215, 0.4173762798309326], [-0.18555641174316406, -0.2527872323989868], [-0.4391443729400635, 0.4961585998535156], [0.31685125827789307, 0.026541709944605827]],
-            [[0.10404694080352783, -0.13734471893310547], [0.27159583568573, -0.31441450119018555], [-0.19031238555908203, -0.4110237350463867], [0.36082923412323, 0.06937099248170853]],
-            [[0.09010922908782959, -0.14499247074127197], [0.011963365621864796, -0.024453163102269173], [0.019212720915675163, -0.47128963470458984], [0.319260835647583, -0.03390287980437279]],
-            [[-0.4758225679397583, 0.29457294940948486], [-0.27342915534973145, -0.3957151174545288], [-0.4871712923049927, 0.23401308059692383], [0.0498192235827446, 0.36743390560150146]],
-            [[0.014585851669311523, 0.1439284086227417], [0.48039305210113525, -0.20658087730407715], [-0.24856233596801758, -0.3857041597366333], [0.2926079034805298, 0.01356136517226696]],
-        ]
-    ),
-    "D": torch.tensor([0.8250121474266052, 0.880149245262146, -0.1953127086162567, -0.03485728800392151, 0.41830334067344666, -1.6710293292999268]),
-    "inputs": torch.tensor(
-        [
-            [2.2928361892700195, 0.3493029475212097, 0.5180468559265137, -1.5153264999389648, -1.6210417747497559, -0.8353503346443176],
-            [1.837212324142456, 1.8336424827575684, -1.670839786529541, 0.15234355628490448, -0.39661338925361633, -1.9082907438278198],
-            [1.1256223917007446, -0.11723752319812775, -0.8295867443084717, -0.9052608609199524, -0.20008143782615662, 1.5660173892974854],
-            [-0.6564075946807861, -0.14119048416614532, 0.507975697517395, 0.22743229568004608, -0.2877075672149658, 0.9503654837608337],
-            [1.7942265272140503, 0.8914651870727539, -0.7096555829048157, 0.44241660833358765, 0.2928091883659363, -1.1137261390686035],
-            [-0.25715067982673645, -0.36642375588417053, 0.8364596366882324, 2.00205135345459, -1.1352518796920776, 0.7003552317619324],
-            [-0.0829664096236229, -1.9080119132995605, 0.23885293209552765, -0.1982821822166443, -0.6431726813316345, -0.5355167388916016],
-            [1.1648699045181274, -0.286666601896286, -0.1263255774974823, 0.3838243782520294, -0.44511428475379944, 0.008286859817802906],
-        ]
-    ),
-    "outputs": torch.tensor(
-        [
-            [1.9863842725753784, 0.43224138021469116, 0.1558600217103958, 0.17721439898014069, -0.4679623246192932, 1.59817373752594],
-            [1.4519730806350708, 1.7170495986938477, 0.15938188135623932, -0.21327261626720428, -0.13914746046066284, 3.0745887756347656],
-            [1.0051506757736206, -0.5617100596427917, 0.4438353180885315, 0.333746999502182, -0.23868393993377686, -2.462185859680176],
-            [-0.5309441089630127, 0.27456438541412354, -0.26072919368743896, -0.24220360815525055, 0.1543002873659134, -1.641975998878479],
-            [1.1425461769104004, 0.893322229385376, 0.11778800189495087, -0.07536820322275162, 0.10305149853229523, 1.7221825122833252],
-            [-0.18747369945049286, -0.6128424406051636, 0.2278294712305069, 0.3840685486793518, -0.7165990471839905, -0.7732985019683838],
-            [-0.262823224067688, -1.3050916194915771, -0.27920520305633545, -0.2818681597709656, -0.2223169207572937, 0.8093514442443848],
-            [0.9533116221427917, -0.7287463545799255, 0.12036441266536713, 0.07889723032712936, -0.6898953914642334, 0.10692300647497177],
-        ]
-    ),
-}
+_TEST_ROOT = Path(__file__).parent
+_REFERENCE_PATH = _TEST_ROOT / "dlinoss_reference_cases.json"
 
 
-def test_dlinoss_matches_reference_snapshot() -> None:
-    ref = REFERENCE_DLINOSS
-    layer = DampedLinOSSLayer(ssm_size=4, hidden_dim=6)
+@lru_cache(maxsize=1)
+def _load_reference_cases() -> dict[str, dict[str, dict[str, object]]]:
+    payload = json.loads(_REFERENCE_PATH.read_text())
+    cases = payload.get("cases", payload)
+    return cases
+
+REFERENCE_CASES = _load_reference_cases()
+
+VARIANTS = tuple(REFERENCE_CASES.keys())
+DTYPES = (torch.float32, torch.float64)
+DTYPE_KEYS = {torch.float32: "float32", torch.float64: "float64"}
+ATOL = {torch.float32: 5e-6, torch.float64: 1e-9}
+RTOL = {torch.float32: 5e-6, torch.float64: 1e-9}
+
+
+def _tensor_from_json(data: object) -> torch.Tensor:
+    return torch.tensor(data, dtype=torch.float64)
+
+
+def _run_fallback(
+    variant: str,
+    a_diag: torch.Tensor,
+    g_diag: torch.Tensor,
+    step: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    d_vec: torch.Tensor,
+    inputs: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch, length, hidden_dim = inputs.shape
+    ssm = a_diag.shape[0]
+
+    b_real = b[..., 0]
+    b_imag = b[..., 1]
+    flat_inputs = inputs.reshape(batch * length, hidden_dim)
+    bu_real = flat_inputs @ b_real.transpose(0, 1)
+    bu_imag = flat_inputs @ b_imag.transpose(0, 1)
+    bu = torch.complex(bu_real, bu_imag).reshape(batch, length, ssm)
+    bu_seq = bu.permute(1, 0, 2).contiguous()
+
+    states = _reference_dlinoss_states(variant, a_diag, g_diag, step, bu_seq)
+    states_main = states[..., 1].permute(1, 0, 2).contiguous()
+    states_aux = states[..., 0].permute(1, 0, 2).contiguous()
+
+    states_flat = states_main.reshape(batch * length, ssm)
+    c_real = c[..., 0]
+    c_imag = c[..., 1]
+    c_real_t = c_real.transpose(0, 1)
+    c_imag_t = c_imag.transpose(0, 1)
+    projected_real = states_flat.real @ c_real_t - states_flat.imag @ c_imag_t
+    projected = projected_real.reshape(batch, length, -1)
+
+    outputs = projected + inputs * d_vec.view(1, 1, -1)
+    return outputs, states_main, states_aux
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_dlinoss_matches_reference(variant: str, dtype: torch.dtype, monkeypatch: pytest.MonkeyPatch) -> None:
+    case = REFERENCE_CASES[variant][DTYPE_KEYS[dtype]]
+    device = torch.device("cpu")
+
+    a_diag = _tensor_from_json(case["A_diag"]).to(dtype=dtype, device=device).clone().requires_grad_(True)
+    g_diag = _tensor_from_json(case["G_diag"]).to(dtype=dtype, device=device).clone().requires_grad_(True)
+    step = _tensor_from_json(case["step"]).to(dtype=dtype, device=device).clone().requires_grad_(True)
+    b = _tensor_from_json(case["B"]).to(dtype=dtype, device=device).clone().requires_grad_(True)
+    c = _tensor_from_json(case["C"]).to(dtype=dtype, device=device).clone().requires_grad_(True)
+    d_vec = _tensor_from_json(case["D"]).to(dtype=dtype, device=device).clone().requires_grad_(True)
+    inputs = _tensor_from_json(case["inputs"]).to(dtype=dtype, device=device)
+
+    outputs_expected = _tensor_from_json(case["outputs"]).to(dtype=dtype, device=device)
+    states_main_expected = _tensor_from_json(case["states"]["main"]).to(dtype=dtype, device=device)
+    states_aux_expected = _tensor_from_json(case["states"]["aux"]).to(dtype=dtype, device=device)
+    grads_expected = {
+        key: _tensor_from_json(value).to(dtype=dtype, device=device)
+        for key, value in case["grads"].items()
+    }
+
+    layer = DampedLinOSSLayer(
+        ssm_size=int(case["ssm_size"]),
+        hidden_dim=int(case["hidden_dim"]),
+        variant=variant,
+    ).to(dtype=dtype)
+
     with torch.no_grad():
-        layer.A_diag.copy_(ref["A_diag"])
-        layer.G_diag.copy_(ref["G_diag"])
-        layer.steps.copy_(ref["steps"])
-        layer.B.copy_(ref["B"])
-        layer.C.copy_(ref["C"])
-        layer.D.copy_(ref["D"])
+        layer.A_diag.copy_(a_diag.detach())
+        layer.G_diag.copy_(g_diag.detach())
+        step_param = torch.logit(step.detach().clamp(1e-6, 1 - 1e-6))
+        layer.steps.copy_(step_param.to(dtype=layer.steps.dtype))
+        layer.B.copy_(b.detach().to(dtype=layer.B.dtype))
+        layer.C.copy_(c.detach().to(dtype=layer.C.dtype))
+        layer.D.copy_(d_vec.detach().to(dtype=layer.D.dtype))
 
-    inputs = ref["inputs"].unsqueeze(0)
-    outputs = layer(inputs)
-    torch.testing.assert_close(outputs.squeeze(0), ref["outputs"], atol=2e-5, rtol=1e-5)
+    monkeypatch.setenv("OSSM_DLINOSS_DISABLE_KERNEL", "1")
+    with torch.no_grad():
+        layer_outputs = layer(inputs)
+    torch.testing.assert_close(layer_outputs, outputs_expected, atol=ATOL[dtype], rtol=RTOL[dtype])
 
-    max_diff = (outputs.squeeze(0) - ref["outputs"]).abs().max().item()
-    assert max_diff < 2.5e-5
+    outputs, states_main, states_aux = _run_fallback(variant, a_diag, g_diag, step, b, c, d_vec, inputs)
+
+    states_main_realimag = torch.stack((states_main.real, states_main.imag), dim=-1)
+    states_aux_realimag = torch.stack((states_aux.real, states_aux.imag), dim=-1)
+
+    torch.testing.assert_close(outputs, outputs_expected, atol=ATOL[dtype], rtol=RTOL[dtype])
+    torch.testing.assert_close(states_main_realimag, states_main_expected, atol=ATOL[dtype], rtol=RTOL[dtype])
+    torch.testing.assert_close(states_aux_realimag, states_aux_expected, atol=ATOL[dtype], rtol=RTOL[dtype])
+
+    loss = (
+        outputs.pow(2).sum()
+        + states_main.real.pow(2).sum()
+        + states_main.imag.pow(2).sum()
+        + states_aux.real.pow(2).sum()
+        + states_aux.imag.pow(2).sum()
+    )
+    loss.backward()
+
+    torch.testing.assert_close(a_diag.grad, grads_expected["A_diag"], atol=ATOL[dtype], rtol=RTOL[dtype])
+    torch.testing.assert_close(g_diag.grad, grads_expected["G_diag"], atol=ATOL[dtype], rtol=RTOL[dtype])
+    torch.testing.assert_close(step.grad, grads_expected["step"], atol=ATOL[dtype], rtol=RTOL[dtype])
+    torch.testing.assert_close(b.grad, grads_expected["B"], atol=ATOL[dtype], rtol=RTOL[dtype])
+    torch.testing.assert_close(c.grad, grads_expected["C"], atol=ATOL[dtype], rtol=RTOL[dtype])
+    torch.testing.assert_close(d_vec.grad, grads_expected["D"], atol=ATOL[dtype], rtol=RTOL[dtype])

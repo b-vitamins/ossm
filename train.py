@@ -43,7 +43,19 @@ COLLATE_FNS = {
     "path": path_collate,
 }
 
-AVAILABLE_MODELS = ("linoss_im", "dlinoss_imex1", "s5", "lru", "ncde", "rnn", "dlinossrec", "mambarec")
+DLINOSS_VARIANTS = ("imex1", "imex2", "im", "ex")
+
+
+AVAILABLE_MODELS = (
+    "linoss_im",
+    "dlinoss",
+    "s5",
+    "lru",
+    "ncde",
+    "rnn",
+    "dlinossrec",
+    "mambarec",
+)
 AVAILABLE_HEADS = ("classification", "regression", "tiedsoftmax")
 AVAILABLE_TASKS = ("classification", "regression", "seqrec")
 # NOTE: Dataset view options are determined by the dataset implementation, not
@@ -507,6 +519,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         default=None,
         help="Override the number of backbone blocks.",
     )
+    model_group.add_argument(
+        "--discretization",
+        choices=DLINOSS_VARIANTS,
+        default=None,
+        help="Select the D-LinOSS discretization when using dlinoss or dlinossrec.",
+    )
 
     data_group = parser.add_argument_group("Dataset")
     data_group.add_argument(
@@ -745,6 +763,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
 
     args, unknown = parser.parse_known_args(argv_list)
 
+    if args.discretization is not None:
+        args.discretization = args.discretization.lower()
+
     device_flag = False
     head_flag = False
     model_flag = False
@@ -896,6 +917,13 @@ def _compose_config(args: argparse.Namespace, extra_overrides: Sequence[str]) ->
         overrides.append(f"model.params.ssm_size={args.ssm_size}")
     if args.num_blocks is not None:
         overrides.append(f"model.params.num_blocks={args.num_blocks}")
+    if args.discretization is not None:
+        if args.model == "dlinoss":
+            overrides.append(f"model.params.variant={args.discretization}")
+        elif args.model == "dlinossrec":
+            overrides.append(f"model.variant={args.discretization}")
+        else:
+            raise ValueError("--discretization is only valid with --model dlinoss or dlinossrec")
 
     if args.window_steps is not None:
         overrides.extend(

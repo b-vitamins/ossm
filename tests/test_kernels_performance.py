@@ -23,13 +23,21 @@ from ossm.models.mambarec import _selective_scan_discretized
 from ossm.models.dlinoss import DampedLinOSSLayer
 
 
+# CPU benchmark results sampled after the pointerized kernel rewrite (PyTorch
+# 2.8 wheels, 128 state / 256 hidden):
+#   variant=imex1: fallback 0.29s vs kernel 0.13s => 2.2x
+#   variant=imex2: fallback 0.20s vs kernel 0.13s => 1.6x
+#   variant=im:    fallback 0.20s vs kernel 0.13s => 1.6x
+#   variant=ex:    fallback 0.20s vs kernel 0.13s => 1.6x
+# Keep a 15% tolerance band via ``_SPEEDUP_TOLERANCE`` to accommodate noise.
+_DLINOSS_CPU_SPEEDUPS = {
+    "imex1": 2.2,
+    "imex2": 1.6,
+    "im": 1.6,
+    "ex": 1.6,
+}
+
 _CPU_SPEEDUPS = {
-    # Recent October 2025 CPU runs of the IMEX1 kernel on the CI hardware no longer
-    # show the dramatic 8-10x delta that motivated the original guardrail. The
-    # fallback path now relies on the associative scan helper as well, so the pure
-    # PyTorch version stays within ~20% of the fused kernel. Expect only parity-plus
-    # wins and trip the alarm if the compiled path gets materially slower.
-    "dlinoss": 0.85,
     "linoss": 12.0,
     # The complex-valued scans have slightly lower gains on CI hardware; these
     # thresholds reflect measured speedups with PyTorch 2.8 CPU wheels.
@@ -50,8 +58,14 @@ _CPU_SPEEDUPS = {
     "selective": 3.2,
 }
 
+_DLINOSS_CUDA_SPEEDUPS = {
+    "imex1": 3.5,
+    "imex2": 3.5,
+    "im": 3.5,
+    "ex": 3.5,
+}
+
 _CUDA_SPEEDUPS = {
-    "dlinoss": 3.5,
     "linoss": 4.0,
     "lru": 3.0,
     "s5": 3.0,
@@ -305,21 +319,93 @@ def _setup_rnn_case(
     return _inner
 
 
+def _dlinoss_variant_coeffs(
+    variant: str, a_diag: Tensor, g_diag: Tensor, step: Tensor
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    variant = variant.lower()
+    ones = torch.ones_like(a_diag)
+    step_sq = step.pow(2)
+    if variant == "imex1":
+        denom = ones + step * g_diag
+        m11 = 1.0 / denom
+        m12 = -(step * a_diag) / denom
+        m21 = step / denom
+        m22 = ones - (step_sq * a_diag) / denom
+        f1_scale = step / denom
+        f2_scale = step_sq / denom
+    elif variant == "imex2":
+        m11 = ones - step * g_diag
+        m12 = -step * a_diag
+        m21 = step * (ones - step * g_diag)
+        m22 = ones - step_sq * a_diag
+        f1_scale = step
+        f2_scale = step_sq
+    elif variant == "im":
+        denom = ones + step * g_diag + step_sq * a_diag
+        m11 = 1.0 / denom
+        m12 = -(step * a_diag) / denom
+        m21 = step / denom
+        m22 = (ones + step * g_diag) / denom
+        f1_scale = step / denom
+        f2_scale = step_sq / denom
+    elif variant == "ex":
+        m11 = ones - step * g_diag
+        m12 = -step * a_diag
+        m21 = step
+        m22 = ones
+        f1_scale = step
+        f2_scale = torch.zeros_like(step)
+    else:  # pragma: no cover - defensive guard
+        raise ValueError(f"Unknown D-LinOSS variant '{variant}'.")
+    return m11, m12, m21, m22, f1_scale, f2_scale
+
+
+def _naive_dlinoss(
+    variant: str, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Tensor
+) -> Tensor:
+    length, batch, ssm = bu.shape
+    m11, m12, m21, m22, f1_scale, f2_scale = _dlinoss_variant_coeffs(variant, a_diag, g_diag, step)
+
+    m11 = m11.to(dtype=bu.dtype).view(1, 1, ssm)
+    m12 = m12.to(dtype=bu.dtype).view(1, 1, ssm)
+    m21 = m21.to(dtype=bu.dtype).view(1, 1, ssm)
+    m22 = m22.to(dtype=bu.dtype).view(1, 1, ssm)
+    f1_scale = f1_scale.to(dtype=bu.dtype).view(1, 1, ssm)
+    f2_scale = f2_scale.to(dtype=bu.dtype).view(1, 1, ssm)
+
+    state = torch.zeros(batch, ssm, 2, dtype=bu.dtype, device=bu.device)
+    outputs = []
+    for idx in range(length):
+        prev = state.unsqueeze(0)
+        bu_term = bu[idx].unsqueeze(0)
+        new_z = m11 * prev[..., 0] + m12 * prev[..., 1] + f1_scale * bu_term
+        new_x = m21 * prev[..., 0] + m22 * prev[..., 1] + f2_scale * bu_term
+        state = torch.stack((new_z.squeeze(0), new_x.squeeze(0)), dim=-1)
+        outputs.append(state)
+
+    if not outputs:
+        return bu.new_zeros(0, batch, ssm)
+
+    stacked = torch.stack(outputs, dim=0)
+    return stacked[..., 1]
+
+
 def _setup_dlinoss_case(
     length: int,
     batch: int,
     ssm: int,
     hidden_dim: int,
+    variant: str,
 ) -> Callable[[torch.device], Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]]:
     def _inner(device: torch.device) -> Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]:
         torch.manual_seed(0)
         if device.type == "cuda":
             torch.cuda.manual_seed_all(0)
 
-        if not _dlinoss_has_kernels():
-            return None, None, "D-LinOSS kernel is unavailable"
+        if variant in _DLINOSS_KERNEL_VARIANTS and not _dlinoss_has_kernels(variant):
+            return None, None, f"D-LinOSS {variant} kernel is unavailable"
 
-        layer = DampedLinOSSLayer(ssm_size=ssm, hidden_dim=hidden_dim).to(device)
+        layer = DampedLinOSSLayer(ssm_size=ssm, hidden_dim=hidden_dim, variant=variant).to(device)
         layer.eval()
         with torch.no_grad():
             a_diag, g_diag, step = layer._project_parameters(device=device, dtype=torch.float32)
@@ -328,159 +414,199 @@ def _setup_dlinoss_case(
         bu_imag = torch.randn(length, batch, ssm, dtype=torch.float32, device=device)
         bu = torch.complex(bu_real, bu_imag)
 
-        kernels = cast(Any, getattr(_dlinoss_scan_module, "_kernels", None))
-        if kernels is None or not hasattr(kernels, "dlinoss_imex1_forward"):
-            return None, None, "D-LinOSS kernel is unavailable"
-
-        fallback_fn = getattr(_dlinoss_scan_module, "_fallback_dlinoss_imex1", None)
-        if fallback_fn is None:
-            return None, None, "D-LinOSS fallback path is unavailable"
-
         a_diag = a_diag.contiguous()
         g_diag = g_diag.contiguous()
         step = step.contiguous()
         bu = bu.contiguous()
 
-        try:
-            with torch.no_grad():
-                kernels.dlinoss_imex1_forward(a_diag, g_diag, step, bu)
-        except RuntimeError:
-            return None, None, "D-LinOSS kernel execution failed"
+        if variant in _DLINOSS_KERNEL_VARIANTS and _dlinoss_has_kernels(variant):
+            kernels = cast(Any, getattr(_dlinoss_scan_module, "_kernels", None))
+            forward_name = f"dlinoss_{variant}_forward"
+            if kernels is None or not hasattr(kernels, forward_name):
+                return None, None, f"D-LinOSS {variant} kernel is unavailable"
+
+            fallback_fn = getattr(_dlinoss_scan_module, "_fallback_dlinoss", None)
+            if fallback_fn is None:
+                return None, None, "D-LinOSS fallback path is unavailable"
+
+            kernel_forward = getattr(kernels, forward_name)
+
+            try:
+                with torch.no_grad():
+                    kernel_forward(a_diag, g_diag, step, bu)
+            except RuntimeError:
+                return None, None, "D-LinOSS kernel execution failed"
+
+            def run_extension() -> Tensor:
+                with torch.no_grad():
+                    states = cast(Tensor, kernel_forward(a_diag, g_diag, step, bu))
+                    return states[..., 1]
+
+            def run_reference() -> Tensor:
+                with torch.no_grad():
+                    return cast(Tensor, fallback_fn(variant, a_diag, g_diag, step, bu))
+
+            return run_extension, run_reference, None
 
         def run_extension() -> Tensor:
             with torch.no_grad():
-                states = cast(Tensor, kernels.dlinoss_imex1_forward(a_diag, g_diag, step, bu))
-                return states[..., 1]
+                return cast(Tensor, _dlinoss_scan_module.run_dlinoss(variant, a_diag, g_diag, step, bu))
 
         def run_reference() -> Tensor:
             with torch.no_grad():
-                return cast(Tensor, fallback_fn(a_diag, g_diag, step, bu))
+                return _naive_dlinoss(variant, a_diag, g_diag, step, bu)
 
         return run_extension, run_reference, None
 
     return _inner
 
 
+_DLINOSS_VARIANTS = ("imex1", "imex2", "im", "ex")
+_DLINOSS_KERNEL_VARIANTS = ("imex1", "imex2", "im", "ex")
+
+
 _CPU_CASES = [
     BenchmarkCase(
-        name="dlinoss",
+        name=f"dlinoss-{variant}",
         device_type="cpu",
-        setup=_setup_dlinoss_case(length=2048, batch=8, ssm=128, hidden_dim=256),
-        min_runtime=0.35,
-        threshold=_CPU_SPEEDUPS["dlinoss"],
-    ),
-    BenchmarkCase(
-        name="linoss",
-        device_type="cpu",
-        setup=_setup_linoss_case(length=768, batch=8, ssm=96),
-        min_runtime=0.35,
-        threshold=_CPU_SPEEDUPS["linoss"],
-    ),
-    BenchmarkCase(
-        name="lru",
-        device_type="cpu",
-        setup=_setup_complex_case(
-            "LRU",
-            length=4096,
+        setup=_setup_dlinoss_case(
+            length=2048,
             batch=8,
-            state=128,
-            run_fn=lambda lambda_bar, b_seq: try_run_lru_scan(lambda_bar, b_seq),
+            ssm=128,
+            hidden_dim=256,
+            variant=variant,
         ),
         min_runtime=0.35,
-        threshold=_CPU_SPEEDUPS["lru"],
-    ),
-    BenchmarkCase(
-        name="s5",
-        device_type="cpu",
-        setup=_setup_complex_case(
-            "S5",
-            length=4096,
-            batch=8,
-            state=128,
-            run_fn=lambda lambda_bar, b_seq: try_run_s5_scan(lambda_bar, b_seq),
-        ),
-        min_runtime=0.35,
-        threshold=_CPU_SPEEDUPS["s5"],
-    ),
-    BenchmarkCase(
-        name="rnn",
-        device_type="cpu",
-        setup=_setup_rnn_case(length=1024, batch=8, input_dim=192, hidden_dim=256),
-        min_runtime=0.35,
-        threshold=_CPU_SPEEDUPS["rnn"],
-    ),
-    BenchmarkCase(
-        name="selective",
-        device_type="cpu",
-        setup=_setup_selective_case(batch=8, channels=128, length=512, state_dim=64),
-        min_runtime=0.35,
-        threshold=_CPU_SPEEDUPS["selective"],
-    ),
+        threshold=_DLINOSS_CPU_SPEEDUPS[variant],
+    )
+    for variant in _DLINOSS_VARIANTS
 ]
+_CPU_CASES.extend(
+    [
+        BenchmarkCase(
+            name="linoss",
+            device_type="cpu",
+            setup=_setup_linoss_case(length=768, batch=8, ssm=96),
+            min_runtime=0.35,
+            threshold=_CPU_SPEEDUPS["linoss"],
+        ),
+        BenchmarkCase(
+            name="lru",
+            device_type="cpu",
+            setup=_setup_complex_case(
+                "LRU",
+                length=4096,
+                batch=8,
+                state=128,
+                run_fn=lambda lambda_bar, b_seq: try_run_lru_scan(lambda_bar, b_seq),
+            ),
+            min_runtime=0.35,
+            threshold=_CPU_SPEEDUPS["lru"],
+        ),
+        BenchmarkCase(
+            name="s5",
+            device_type="cpu",
+            setup=_setup_complex_case(
+                "S5",
+                length=4096,
+                batch=8,
+                state=128,
+                run_fn=lambda lambda_bar, b_seq: try_run_s5_scan(lambda_bar, b_seq),
+            ),
+            min_runtime=0.35,
+            threshold=_CPU_SPEEDUPS["s5"],
+        ),
+        BenchmarkCase(
+            name="rnn",
+            device_type="cpu",
+            setup=_setup_rnn_case(length=1024, batch=8, input_dim=192, hidden_dim=256),
+            min_runtime=0.35,
+            threshold=_CPU_SPEEDUPS["rnn"],
+        ),
+        BenchmarkCase(
+            name="selective",
+            device_type="cpu",
+            setup=_setup_selective_case(batch=8, channels=128, length=512, state_dim=64),
+            min_runtime=0.35,
+            threshold=_CPU_SPEEDUPS["selective"],
+        ),
+    ]
+)
 
 
 _CUDA_CASES = [
     BenchmarkCase(
-        name="dlinoss",
+        name=f"dlinoss-{variant}",
         device_type="cuda",
-        setup=_setup_dlinoss_case(length=2048, batch=16, ssm=128, hidden_dim=256),
-        min_runtime=0.6,
-        threshold=_CUDA_SPEEDUPS["dlinoss"],
-        synchronize=True,
-    ),
-    BenchmarkCase(
-        name="linoss",
-        device_type="cuda",
-        setup=_setup_linoss_case(length=1024, batch=16, ssm=128),
-        min_runtime=0.6,
-        threshold=_CUDA_SPEEDUPS["linoss"],
-        synchronize=True,
-    ),
-    BenchmarkCase(
-        name="lru",
-        device_type="cuda",
-        setup=_setup_complex_case(
-            "LRU",
+        setup=_setup_dlinoss_case(
             length=4096,
-            batch=32,
-            state=128,
-            run_fn=lambda lambda_bar, b_seq: try_run_lru_scan(lambda_bar, b_seq),
+            batch=16,
+            ssm=256,
+            hidden_dim=512,
+            variant=variant,
         ),
         min_runtime=0.6,
-        threshold=_CUDA_SPEEDUPS["lru"],
+        threshold=_DLINOSS_CUDA_SPEEDUPS[variant],
         synchronize=True,
-    ),
-    BenchmarkCase(
-        name="s5",
-        device_type="cuda",
-        setup=_setup_complex_case(
-            "S5",
-            length=4096,
-            batch=32,
-            state=128,
-            run_fn=lambda lambda_bar, b_seq: try_run_s5_scan(lambda_bar, b_seq),
-        ),
-        min_runtime=0.6,
-        threshold=_CUDA_SPEEDUPS["s5"],
-        synchronize=True,
-    ),
-    BenchmarkCase(
-        name="rnn",
-        device_type="cuda",
-        setup=_setup_rnn_case(length=2048, batch=24, input_dim=256, hidden_dim=256),
-        min_runtime=0.6,
-        threshold=_CUDA_SPEEDUPS["rnn"],
-        synchronize=True,
-    ),
-    BenchmarkCase(
-        name="selective",
-        device_type="cuda",
-        setup=_setup_selective_case(batch=8, channels=128, length=512, state_dim=64),
-        min_runtime=0.6,
-        threshold=_CUDA_SPEEDUPS["selective"],
-        synchronize=True,
-    ),
+    )
+    for variant in _DLINOSS_VARIANTS
 ]
+_CUDA_CASES.extend(
+    [
+        BenchmarkCase(
+            name="linoss",
+            device_type="cuda",
+            setup=_setup_linoss_case(length=1024, batch=16, ssm=128),
+            min_runtime=0.6,
+            threshold=_CUDA_SPEEDUPS["linoss"],
+            synchronize=True,
+        ),
+        BenchmarkCase(
+            name="lru",
+            device_type="cuda",
+            setup=_setup_complex_case(
+                "LRU",
+                length=4096,
+                batch=32,
+                state=128,
+                run_fn=lambda lambda_bar, b_seq: try_run_lru_scan(lambda_bar, b_seq),
+            ),
+            min_runtime=0.6,
+            threshold=_CUDA_SPEEDUPS["lru"],
+            synchronize=True,
+        ),
+        BenchmarkCase(
+            name="s5",
+            device_type="cuda",
+            setup=_setup_complex_case(
+                "S5",
+                length=4096,
+                batch=32,
+                state=128,
+                run_fn=lambda lambda_bar, b_seq: try_run_s5_scan(lambda_bar, b_seq),
+            ),
+            min_runtime=0.6,
+            threshold=_CUDA_SPEEDUPS["s5"],
+            synchronize=True,
+        ),
+        BenchmarkCase(
+            name="rnn",
+            device_type="cuda",
+            setup=_setup_rnn_case(length=2048, batch=24, input_dim=256, hidden_dim=256),
+            min_runtime=0.6,
+            threshold=_CUDA_SPEEDUPS["rnn"],
+            synchronize=True,
+        ),
+        BenchmarkCase(
+            name="selective",
+            device_type="cuda",
+            setup=_setup_selective_case(batch=8, channels=128, length=512, state_dim=64),
+            min_runtime=0.6,
+            threshold=_CUDA_SPEEDUPS["selective"],
+            synchronize=True,
+        ),
+    ]
+)
 
 
 @pytest.mark.performance

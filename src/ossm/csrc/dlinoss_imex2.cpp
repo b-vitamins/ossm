@@ -11,7 +11,7 @@ namespace ossm {
 namespace {
 
 template <typename scalar_t>
-void dlinoss_imex1_forward_cpu_kernel(const typename ComplexTraits<scalar_t>::value_t* __restrict__ a_diag,
+void dlinoss_imex2_forward_cpu_kernel(const typename ComplexTraits<scalar_t>::value_t* __restrict__ a_diag,
                                       const typename ComplexTraits<scalar_t>::value_t* __restrict__ g_diag,
                                       const typename ComplexTraits<scalar_t>::value_t* __restrict__ step,
                                       const scalar_t* __restrict__ bu_ptr,
@@ -25,36 +25,35 @@ void dlinoss_imex1_forward_cpu_kernel(const typename ComplexTraits<scalar_t>::va
   const int64_t series = batch * ssm;
   const int64_t step_stride = series * 2;
 
-  std::vector<value_t> inv(ssm);
-  std::vector<value_t> sigma_inv(ssm);
-  std::vector<value_t> sigma2_inv(ssm);
-  std::vector<value_t> coeff12(ssm);
-  std::vector<value_t> coeff22(ssm);
+  std::vector<value_t> sigma(ssm);
+  std::vector<value_t> sigma_sq(ssm);
+  std::vector<value_t> m11(ssm);
+  std::vector<value_t> m12(ssm);
+  std::vector<value_t> m21(ssm);
+  std::vector<value_t> m22(ssm);
 
   for (int64_t state = 0; state < ssm; ++state) {
     const value_t alpha = a_diag[state];
     const value_t gamma = g_diag[state];
-    const value_t sigma = step[state];
+    const value_t sigma_val = step[state];
+    const value_t sigma_sq_val = sigma_val * sigma_val;
 
-    const value_t denom = value_t(1) + sigma * gamma;
-    const value_t inv_val = value_t(1) / denom;
-    const value_t sigma_inv_val = sigma * inv_val;
-    const value_t sigma2_inv_val = sigma * sigma * inv_val;
-
-    inv[state] = inv_val;
-    sigma_inv[state] = sigma_inv_val;
-    sigma2_inv[state] = sigma2_inv_val;
-    coeff12[state] = -alpha * sigma_inv_val;
-    coeff22[state] = value_t(1) - alpha * sigma2_inv_val;
+    sigma[state] = sigma_val;
+    sigma_sq[state] = sigma_sq_val;
+    m11[state] = value_t(1) - sigma_val * gamma;
+    m12[state] = -sigma_val * alpha;
+    m21[state] = sigma_val - sigma_sq_val * gamma;
+    m22[state] = value_t(1) - sigma_sq_val * alpha;
   }
 
   at::parallel_for(0, ssm, 1, [&](int64_t begin, int64_t end) {
     for (int64_t state = begin; state < end; ++state) {
-      const value_t inv_val = inv[state];
-      const value_t sigma_inv_val = sigma_inv[state];
-      const value_t sigma2_inv_val = sigma2_inv[state];
-      const value_t coeff12_val = coeff12[state];
-      const value_t coeff22_val = coeff22[state];
+      const value_t sigma_val = sigma[state];
+      const value_t sigma_sq_val = sigma_sq[state];
+      const value_t m11_val = m11[state];
+      const value_t m12_val = m12[state];
+      const value_t m21_val = m21[state];
+      const value_t m22_val = m22[state];
 
       for (int64_t batch_idx = 0; batch_idx < batch; ++batch_idx) {
         const int64_t series_idx = batch_idx * ssm + state;
@@ -72,10 +71,10 @@ void dlinoss_imex1_forward_cpu_kernel(const typename ComplexTraits<scalar_t>::va
           const value_t bu_real = bu_val.real();
           const value_t bu_imag = bu_val.imag();
 
-          const value_t new0_real = state0_real * inv_val + state1_real * coeff12_val + bu_real * sigma_inv_val;
-          const value_t new0_imag = state0_imag * inv_val + state1_imag * coeff12_val + bu_imag * sigma_inv_val;
-          const value_t new1_real = state0_real * sigma_inv_val + state1_real * coeff22_val + bu_real * sigma2_inv_val;
-          const value_t new1_imag = state0_imag * sigma_inv_val + state1_imag * coeff22_val + bu_imag * sigma2_inv_val;
+          const value_t new0_real = state0_real * m11_val + state1_real * m12_val + bu_real * sigma_val;
+          const value_t new0_imag = state0_imag * m11_val + state1_imag * m12_val + bu_imag * sigma_val;
+          const value_t new1_real = state0_real * m21_val + state1_real * m22_val + bu_real * sigma_sq_val;
+          const value_t new1_imag = state0_imag * m21_val + state1_imag * m22_val + bu_imag * sigma_sq_val;
 
           out_series[0] = scalar_t(new0_real, new0_imag);
           out_series[1] = scalar_t(new1_real, new1_imag);
@@ -94,7 +93,7 @@ void dlinoss_imex1_forward_cpu_kernel(const typename ComplexTraits<scalar_t>::va
 }
 
 template <typename scalar_t>
-void dlinoss_imex1_backward_cpu_kernel(const typename ComplexTraits<scalar_t>::value_t* __restrict__ a_diag,
+void dlinoss_imex2_backward_cpu_kernel(const typename ComplexTraits<scalar_t>::value_t* __restrict__ a_diag,
                                        const typename ComplexTraits<scalar_t>::value_t* __restrict__ g_diag,
                                        const typename ComplexTraits<scalar_t>::value_t* __restrict__ step,
                                        const scalar_t* __restrict__ bu_ptr,
@@ -113,44 +112,50 @@ void dlinoss_imex1_backward_cpu_kernel(const typename ComplexTraits<scalar_t>::v
   const int64_t series = batch * ssm;
   const int64_t step_stride = series * 2;
 
-  std::vector<value_t> inv(ssm);
-  std::vector<value_t> sigma_inv(ssm);
-  std::vector<value_t> sigma2_inv(ssm);
-  std::vector<value_t> coeff12(ssm);
-  std::vector<value_t> coeff22(ssm);
+  std::vector<value_t> sigma(ssm);
+  std::vector<value_t> sigma_sq(ssm);
+  std::vector<value_t> m11(ssm);
+  std::vector<value_t> m12(ssm);
+  std::vector<value_t> m21(ssm);
+  std::vector<value_t> m22(ssm);
+  std::vector<value_t> d_sigma_prev0(ssm);
+  std::vector<value_t> d_sigma_prev1(ssm);
+  std::vector<value_t> d_sigma_bu(ssm);
 
   for (int64_t state = 0; state < ssm; ++state) {
     const value_t alpha = a_diag[state];
     const value_t gamma = g_diag[state];
-    const value_t sigma = step[state];
+    const value_t sigma_val = step[state];
+    const value_t sigma_sq_val = sigma_val * sigma_val;
 
-    const value_t denom = value_t(1) + sigma * gamma;
-    const value_t inv_val = value_t(1) / denom;
-    const value_t sigma_inv_val = sigma * inv_val;
-    const value_t sigma2_inv_val = sigma * sigma * inv_val;
-
-    inv[state] = inv_val;
-    sigma_inv[state] = sigma_inv_val;
-    sigma2_inv[state] = sigma2_inv_val;
-    coeff12[state] = -alpha * sigma_inv_val;
-    coeff22[state] = value_t(1) - alpha * sigma2_inv_val;
+    sigma[state] = sigma_val;
+    sigma_sq[state] = sigma_sq_val;
+    m11[state] = value_t(1) - sigma_val * gamma;
+    m12[state] = -sigma_val * alpha;
+    m21[state] = sigma_val - sigma_sq_val * gamma;
+    m22[state] = value_t(1) - sigma_sq_val * alpha;
+    d_sigma_prev0[state] = value_t(1) - value_t(2) * sigma_val * gamma;
+    d_sigma_prev1[state] = -value_t(2) * sigma_val * alpha;
+    d_sigma_bu[state] = value_t(2) * sigma_val;
   }
 
   at::parallel_for(0, ssm, 1, [&](int64_t begin, int64_t end) {
     for (int64_t state = begin; state < end; ++state) {
       const value_t alpha = a_diag[state];
       const value_t gamma = g_diag[state];
-      const value_t sigma = step[state];
-      const value_t inv_val = inv[state];
-      const value_t sigma_inv_val = sigma_inv[state];
-      const value_t sigma2_inv_val = sigma2_inv[state];
-      const value_t coeff12_val = coeff12[state];
-      const value_t coeff22_val = coeff22[state];
+      const value_t sigma_val = sigma[state];
+      const value_t sigma_sq_val = sigma_sq[state];
+      const value_t m11_val = m11[state];
+      const value_t m12_val = m12[state];
+      const value_t m21_val = m21[state];
+      const value_t m22_val = m22[state];
+      const value_t d_sigma_prev0_val = d_sigma_prev0[state];
+      const value_t d_sigma_prev1_val = d_sigma_prev1[state];
+      const value_t d_sigma_bu_val = d_sigma_bu[state];
 
       value_t grad_alpha_state = value_t(0);
-      value_t grad_sigma_inv_state = value_t(0);
-      value_t grad_sigma2_inv_state = value_t(0);
-      value_t grad_inv_state = value_t(0);
+      value_t grad_gamma_state = value_t(0);
+      value_t grad_sigma_state = value_t(0);
 
       for (int64_t batch_idx = 0; batch_idx < batch; ++batch_idx) {
         const int64_t series_idx = batch_idx * ssm + state;
@@ -171,51 +176,61 @@ void dlinoss_imex1_backward_cpu_kernel(const typename ComplexTraits<scalar_t>::v
           const scalar_t bu_val = *bu_series;
 
           const bool has_prev = t > 0;
-          const scalar_t prev0_val = has_prev ? prev_states[0] : scalar_t(0, 0);
-          const scalar_t prev1_val = has_prev ? prev_states[1] : scalar_t(0, 0);
-
-          const value_t prev0_real = prev0_val.real();
-          const value_t prev0_imag = prev0_val.imag();
-          const value_t prev1_real = prev1_val.real();
-          const value_t prev1_imag = prev1_val.imag();
-          const value_t bu_real = bu_val.real();
-          const value_t bu_imag = bu_val.imag();
+          value_t prev0_real = value_t(0);
+          value_t prev0_imag = value_t(0);
+          value_t prev1_real = value_t(0);
+          value_t prev1_imag = value_t(0);
+          if (has_prev) {
+            const scalar_t prev0_val = prev_states[0];
+            const scalar_t prev1_val = prev_states[1];
+            prev0_real = prev0_val.real();
+            prev0_imag = prev0_val.imag();
+            prev1_real = prev1_val.real();
+            prev1_imag = prev1_val.imag();
+          }
 
           const value_t grad_out_real = grad_out_val.real();
           const value_t grad_out_imag = grad_out_val.imag();
+          const value_t bu_real = bu_val.real();
+          const value_t bu_imag = bu_val.imag();
 
           const value_t grad_new1_real = grad_state1_real + grad_out_real;
           const value_t grad_new1_imag = grad_state1_imag + grad_out_imag;
           const value_t grad_new0_real = grad_state0_real;
           const value_t grad_new0_imag = grad_state0_imag;
 
-          const value_t neg_alpha_prev1_real = -alpha * prev1_real;
-          const value_t neg_alpha_prev1_imag = -alpha * prev1_imag;
-          const value_t bu_combined_real = neg_alpha_prev1_real + bu_real;
-          const value_t bu_combined_imag = neg_alpha_prev1_imag + bu_imag;
+          grad_alpha_state += (-sigma_val) * (grad_new0_real * prev1_real + grad_new0_imag * prev1_imag);
+          grad_alpha_state += (-sigma_sq_val) * (grad_new1_real * prev1_real + grad_new1_imag * prev1_imag);
 
-          grad_sigma_inv_state += grad_new0_real * bu_combined_real + grad_new0_imag * bu_combined_imag;
-          grad_sigma_inv_state += grad_new1_real * prev0_real + grad_new1_imag * prev0_imag;
-          grad_sigma2_inv_state += grad_new1_real * bu_combined_real + grad_new1_imag * bu_combined_imag;
-          grad_alpha_state += grad_new0_real * (-sigma_inv_val * prev1_real) +
-                              grad_new0_imag * (-sigma_inv_val * prev1_imag);
-          grad_alpha_state += grad_new1_real * (-sigma2_inv_val * prev1_real) +
-                              grad_new1_imag * (-sigma2_inv_val * prev1_imag);
-          grad_inv_state += grad_new0_real * prev0_real + grad_new0_imag * prev0_imag;
+          grad_gamma_state += (-sigma_val) * (grad_new0_real * prev0_real + grad_new0_imag * prev0_imag);
+          grad_gamma_state += (-sigma_sq_val) * (grad_new1_real * prev0_real + grad_new1_imag * prev0_imag);
 
-          const value_t grad_bu_real = grad_new0_real * sigma_inv_val + grad_new1_real * sigma2_inv_val;
-          const value_t grad_bu_imag = grad_new0_imag * sigma_inv_val + grad_new1_imag * sigma2_inv_val;
+          const value_t sigma_term_real = prev0_real * (-gamma) + prev1_real * (-alpha) + bu_real;
+          const value_t sigma_term_imag = prev0_imag * (-gamma) + prev1_imag * (-alpha) + bu_imag;
+          grad_sigma_state += grad_new0_real * sigma_term_real + grad_new0_imag * sigma_term_imag;
+
+          const value_t sigma_grad_term_real = prev0_real * d_sigma_prev0_val +
+                                               prev1_real * d_sigma_prev1_val +
+                                               bu_real * d_sigma_bu_val;
+          const value_t sigma_grad_term_imag = prev0_imag * d_sigma_prev0_val +
+                                               prev1_imag * d_sigma_prev1_val +
+                                               bu_imag * d_sigma_bu_val;
+          grad_sigma_state +=
+              grad_new1_real * sigma_grad_term_real + grad_new1_imag * sigma_grad_term_imag;
+
+          const value_t grad_bu_real = grad_new0_real * sigma_val + grad_new1_real * sigma_sq_val;
+          const value_t grad_bu_imag = grad_new0_imag * sigma_val + grad_new1_imag * sigma_sq_val;
           *grad_bu_series = scalar_t(grad_bu_real, grad_bu_imag);
 
-          const value_t grad_prev0_real = grad_new0_real * inv_val + grad_new1_real * sigma_inv_val;
-          const value_t grad_prev0_imag = grad_new0_imag * inv_val + grad_new1_imag * sigma_inv_val;
-          const value_t grad_prev1_real = grad_new0_real * coeff12_val + grad_new1_real * coeff22_val;
-          const value_t grad_prev1_imag = grad_new0_imag * coeff12_val + grad_new1_imag * coeff22_val;
+          const value_t next_state0_real = grad_new0_real * m11_val + grad_new1_real * m21_val;
+          const value_t next_state0_imag = grad_new0_imag * m11_val + grad_new1_imag * m21_val;
+          const value_t next_state1_real = grad_new0_real * m12_val + grad_new1_real * m22_val;
+          const value_t next_state1_imag = grad_new0_imag * m12_val + grad_new1_imag * m22_val;
 
-          grad_state0_real = grad_prev0_real;
-          grad_state0_imag = grad_prev0_imag;
-          grad_state1_real = grad_prev1_real;
-          grad_state1_imag = grad_prev1_imag;
+          grad_state0_real = next_state0_real;
+          grad_state0_imag = next_state0_imag;
+          grad_state1_real = next_state1_real;
+          grad_state1_imag = next_state1_imag;
 
           if (has_prev) {
             prev_states -= step_stride;
@@ -227,17 +242,6 @@ void dlinoss_imex1_backward_cpu_kernel(const typename ComplexTraits<scalar_t>::v
         }
       }
 
-      value_t grad_sigma_state = grad_sigma_inv_state * inv_val;
-      value_t grad_inv_total = grad_inv_state + grad_sigma_inv_state * sigma;
-
-      const value_t grad_sigma_sq = grad_sigma2_inv_state * inv_val;
-      grad_inv_total += grad_sigma2_inv_state * sigma * sigma;
-      grad_sigma_state += grad_sigma_sq * value_t(2) * sigma;
-
-      const value_t inv_sq = inv_val * inv_val;
-      grad_sigma_state += grad_inv_total * (-gamma) * inv_sq;
-      const value_t grad_gamma_state = grad_inv_total * (-sigma) * inv_sq;
-
       grad_a_ptr[state] = grad_alpha_state;
       grad_step_ptr[state] = grad_sigma_state;
       grad_g_ptr[state] = grad_gamma_state;
@@ -245,7 +249,7 @@ void dlinoss_imex1_backward_cpu_kernel(const typename ComplexTraits<scalar_t>::v
   });
 }
 
-void dlinoss_imex1_forward_cpu(const at::Tensor& a_diag,
+void dlinoss_imex2_forward_cpu(const at::Tensor& a_diag,
                                 const at::Tensor& g_diag,
                                 const at::Tensor& step,
                                 const at::Tensor& bu,
@@ -254,8 +258,8 @@ void dlinoss_imex1_forward_cpu(const at::Tensor& a_diag,
   const auto batch = bu.size(1);
   const auto ssm = bu.size(2);
 
-  AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "dlinoss_imex1_forward_cpu", [&] {
-    dlinoss_imex1_forward_cpu_kernel<scalar_t>(a_diag.data_ptr<typename scalar_t::value_type>(),
+  AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "dlinoss_imex2_forward_cpu", [&] {
+    dlinoss_imex2_forward_cpu_kernel<scalar_t>(a_diag.data_ptr<typename scalar_t::value_type>(),
                                                g_diag.data_ptr<typename scalar_t::value_type>(),
                                                step.data_ptr<typename scalar_t::value_type>(),
                                                bu.data_ptr<scalar_t>(),
@@ -266,7 +270,7 @@ void dlinoss_imex1_forward_cpu(const at::Tensor& a_diag,
   });
 }
 
-void dlinoss_imex1_backward_cpu(const at::Tensor& a_diag,
+void dlinoss_imex2_backward_cpu(const at::Tensor& a_diag,
                                  const at::Tensor& g_diag,
                                  const at::Tensor& step,
                                  const at::Tensor& bu,
@@ -280,8 +284,8 @@ void dlinoss_imex1_backward_cpu(const at::Tensor& a_diag,
   const auto batch = bu.size(1);
   const auto ssm = bu.size(2);
 
-  AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "dlinoss_imex1_backward_cpu", [&] {
-    dlinoss_imex1_backward_cpu_kernel<scalar_t>(a_diag.data_ptr<typename scalar_t::value_type>(),
+  AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "dlinoss_imex2_backward_cpu", [&] {
+    dlinoss_imex2_backward_cpu_kernel<scalar_t>(a_diag.data_ptr<typename scalar_t::value_type>(),
                                                 g_diag.data_ptr<typename scalar_t::value_type>(),
                                                 step.data_ptr<typename scalar_t::value_type>(),
                                                 bu.data_ptr<scalar_t>(),
@@ -300,16 +304,13 @@ void dlinoss_imex1_backward_cpu(const at::Tensor& a_diag,
 #ifdef WITH_CUDA
 }  // end anonymous namespace
 
-// Declare CUDA implementations with external linkage in the ossm namespace to
-// match the definitions in dlinoss_imex1_cuda.cu and avoid undefined symbols at
-// import time.
-void dlinoss_imex1_forward_cuda(const at::Tensor& a_diag,
+void dlinoss_imex2_forward_cuda(const at::Tensor& a_diag,
                                 const at::Tensor& g_diag,
                                 const at::Tensor& step,
                                 const at::Tensor& bu,
                                 at::Tensor& output);
 
-void dlinoss_imex1_backward_cuda(const at::Tensor& a_diag,
+void dlinoss_imex2_backward_cuda(const at::Tensor& a_diag,
                                  const at::Tensor& g_diag,
                                  const at::Tensor& step,
                                  const at::Tensor& bu,
@@ -320,12 +321,12 @@ void dlinoss_imex1_backward_cuda(const at::Tensor& a_diag,
                                  at::Tensor& grad_step,
                                  at::Tensor& grad_bu);
 
-namespace {  // reopen anonymous namespace for the remaining helpers
+namespace {
 #endif
 
 }  // namespace
 
-torch::Tensor dlinoss_imex1_forward(const at::Tensor& a_diag,
+torch::Tensor dlinoss_imex2_forward(const at::Tensor& a_diag,
                                     const at::Tensor& g_diag,
                                     const at::Tensor& step,
                                     const at::Tensor& bu) {
@@ -351,18 +352,18 @@ torch::Tensor dlinoss_imex1_forward(const at::Tensor& a_diag,
 
   if (bu.is_cuda()) {
 #ifdef WITH_CUDA
-    dlinoss_imex1_forward_cuda(a_diag, g_diag, step, bu, output);
+    dlinoss_imex2_forward_cuda(a_diag, g_diag, step, bu, output);
 #else
-    TORCH_CHECK(false, "dlinoss_imex1 CUDA extension was not built");
+    TORCH_CHECK(false, "dlinoss_imex2 CUDA extension was not built");
 #endif
   } else {
-    dlinoss_imex1_forward_cpu(a_diag, g_diag, step, bu, output);
+    dlinoss_imex2_forward_cpu(a_diag, g_diag, step, bu, output);
   }
 
   return output;
 }
 
-std::vector<at::Tensor> dlinoss_imex1_backward(const at::Tensor& a_diag,
+std::vector<at::Tensor> dlinoss_imex2_backward(const at::Tensor& a_diag,
                                                const at::Tensor& g_diag,
                                                const at::Tensor& step,
                                                const at::Tensor& bu,
@@ -389,12 +390,12 @@ std::vector<at::Tensor> dlinoss_imex1_backward(const at::Tensor& a_diag,
 
   if (bu.is_cuda()) {
 #ifdef WITH_CUDA
-    dlinoss_imex1_backward_cuda(a_diag, g_diag, step, bu, states, grad_output, grad_a, grad_g, grad_step, grad_bu);
+    dlinoss_imex2_backward_cuda(a_diag, g_diag, step, bu, states, grad_output, grad_a, grad_g, grad_step, grad_bu);
 #else
-    TORCH_CHECK(false, "dlinoss_imex1 CUDA extension was not built");
+    TORCH_CHECK(false, "dlinoss_imex2 CUDA extension was not built");
 #endif
   } else {
-    dlinoss_imex1_backward_cpu(a_diag, g_diag, step, bu, states, grad_output, grad_a, grad_g, grad_step, grad_bu);
+    dlinoss_imex2_backward_cpu(a_diag, g_diag, step, bu, states, grad_output, grad_a, grad_g, grad_step, grad_bu);
   }
 
   return {grad_a, grad_g, grad_step, grad_bu};

@@ -1,7 +1,14 @@
 import torch
 import pytest
 
+import pytest
+import torch
+
+from ossm.models._dlinoss_scan import run_dlinoss
 from ossm.models.dlinoss import DampedLinOSSBackbone, DampedLinOSSLayer
+
+
+VARIANTS = ("imex1", "imex2", "im", "ex")
 
 
 def _reference_dlinoss(layer: DampedLinOSSLayer, inputs: torch.Tensor) -> torch.Tensor:
@@ -13,61 +20,63 @@ def _reference_dlinoss(layer: DampedLinOSSLayer, inputs: torch.Tensor) -> torch.
 
     device = inputs.device
     dtype = inputs.dtype
-    complex_dtype = (
-        torch.complex64 if dtype in {torch.float32, torch.bfloat16} else torch.complex128
+    compute_dtype = dtype
+    if dtype in (torch.float16, torch.bfloat16):
+        compute_dtype = torch.float32
+
+    scan_real_dtype = torch.float32
+    scan_complex_dtype = torch.complex64
+    if compute_dtype == torch.float64:
+        scan_real_dtype = torch.float64
+        scan_complex_dtype = torch.complex128
+
+    a_diag, g_diag, step = layer._project_parameters(device=device, dtype=compute_dtype)
+
+    b_real = layer.B[..., 0].to(device=device, dtype=compute_dtype)
+    b_imag = layer.B[..., 1].to(device=device, dtype=compute_dtype)
+    c_real = layer.C[..., 0].to(device=device, dtype=compute_dtype)
+    c_imag = layer.C[..., 1].to(device=device, dtype=compute_dtype)
+    d_vec = layer.D.to(device=device, dtype=compute_dtype)
+
+    layer_inputs = inputs if compute_dtype == dtype else inputs.to(dtype=compute_dtype)
+    flat_inputs = layer_inputs.reshape(batch * length, hidden_dim)
+
+    bu_real = flat_inputs @ b_real.transpose(0, 1)
+    bu_imag = flat_inputs @ b_imag.transpose(0, 1)
+    bu = torch.complex(
+        bu_real.to(dtype=scan_real_dtype),
+        bu_imag.to(dtype=scan_real_dtype),
+    ).to(dtype=scan_complex_dtype).reshape(batch, length, layer.ssm_size)
+
+    bu_seq = bu.to(dtype=scan_complex_dtype)
+    states = run_dlinoss(
+        layer.variant,
+        a_diag.to(dtype=scan_real_dtype),
+        g_diag.to(dtype=scan_real_dtype),
+        step.to(dtype=scan_real_dtype),
+        bu_seq.permute(1, 0, 2).contiguous(),
     )
 
-    a_raw = layer.A_diag.to(device=device, dtype=dtype)
-    g_raw = layer.G_diag.to(device=device, dtype=dtype)
-    step_raw = layer.steps.to(device=device, dtype=dtype)
+    states = states.permute(1, 0, 2).contiguous()
+    states_real = states.real.to(dtype=compute_dtype)
+    states_imag = states.imag.to(dtype=compute_dtype)
 
-    step = torch.sigmoid(step_raw)
-    g_diag = torch.relu(g_raw)
-    denom = torch.clamp(step * step, min=1e-6)
-    s = step * g_diag
-    base = torch.sqrt(torch.clamp(1.0 + s, min=1e-6))
-    a_low = (2.0 + s - 2.0 * base) / denom
-    a_high = (2.0 + s + 2.0 * base) / denom
-    a_diag = a_low + torch.relu(a_raw - a_low) - torch.relu(a_raw - a_high)
-
-    S = 1.0 + step * g_diag
-    m11 = 1.0 / S
-    m12 = -(step * a_diag) / S
-    m21 = step / S
-    m22 = 1.0 - (step * step * a_diag) / S
-    f1_scale = step / S
-    f2_scale = (step * step) / S
-
-    b_complex = torch.view_as_complex(layer.B.contiguous()).to(device=device, dtype=complex_dtype)
-    c_complex = torch.view_as_complex(layer.C.contiguous()).to(device=device, dtype=complex_dtype)
-    d_vec = layer.D.to(device=device, dtype=dtype)
-
-    inputs_complex = inputs.to(dtype=dtype).to(dtype=complex_dtype)
-    bu = torch.einsum("blh,ph->blp", inputs_complex, b_complex)
-
-    state = torch.zeros(batch, layer.ssm_size, 2, dtype=complex_dtype, device=device)
-    outputs = []
-    for t in range(length):
-        f1 = f1_scale * bu[:, t]
-        f2 = f2_scale * bu[:, t]
-        new0 = m11 * state[..., 0] + m12 * state[..., 1] + f1
-        new1 = m21 * state[..., 0] + m22 * state[..., 1] + f2
-        state = torch.stack((new0, new1), dim=-1)
-        outputs.append(state)
-
-    if not outputs:
-        projected = inputs.new_zeros(batch, 0, hidden_dim)
-        return projected
-
-    states = torch.stack(outputs, dim=1)[..., 1]
-    projected = torch.einsum("blp,hp->blh", states, c_complex).real
-    du = inputs * d_vec
-    return projected + du
+    c_real_t = c_real.transpose(0, 1).to(dtype=compute_dtype)
+    c_imag_t = c_imag.transpose(0, 1).to(dtype=compute_dtype)
+    projected_real = states_real.reshape(batch * length, layer.ssm_size) @ c_real_t
+    projected_imag = states_imag.reshape(batch * length, layer.ssm_size) @ c_imag_t
+    projected = (projected_real - projected_imag).reshape(batch, length, hidden_dim)
+    du = layer_inputs * d_vec
+    outputs = projected + du
+    if compute_dtype == dtype:
+        return outputs
+    return outputs.to(dtype=dtype)
 
 
-def test_dlinoss_layer_matches_reference() -> None:
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_dlinoss_layer_matches_reference(variant: str) -> None:
     torch.manual_seed(0)
-    layer = DampedLinOSSLayer(ssm_size=6, hidden_dim=5)
+    layer = DampedLinOSSLayer(ssm_size=6, hidden_dim=5, variant=variant)
     inputs = torch.randn(3, 11, 5)
 
     outputs = layer(inputs)
@@ -76,9 +85,10 @@ def test_dlinoss_layer_matches_reference() -> None:
     torch.testing.assert_close(outputs, reference, rtol=1e-5, atol=1e-6)
 
 
-def test_dlinoss_layer_zero_length() -> None:
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_dlinoss_layer_zero_length(variant: str) -> None:
     torch.manual_seed(1)
-    layer = DampedLinOSSLayer(ssm_size=4, hidden_dim=3)
+    layer = DampedLinOSSLayer(ssm_size=4, hidden_dim=3, variant=variant)
     inputs = torch.randn(2, 0, 3)
 
     outputs = layer(inputs)
@@ -87,13 +97,15 @@ def test_dlinoss_layer_zero_length() -> None:
     torch.testing.assert_close(outputs, reference)
 
 
-def test_dlinoss_backbone_shapes() -> None:
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_dlinoss_backbone_shapes(variant: str) -> None:
     torch.manual_seed(2)
     backbone = DampedLinOSSBackbone(
         num_blocks=2,
         input_dim=5,
         ssm_size=4,
         hidden_dim=6,
+        variant=variant,
     )
     inputs = torch.randn(3, 11, 5)
 
@@ -102,15 +114,16 @@ def test_dlinoss_backbone_shapes() -> None:
     assert output.pooled.shape == (3, 6)
 
 
+@pytest.mark.parametrize("variant", VARIANTS)
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_dlinoss_layer_cuda_matches_cpu() -> None:
+def test_dlinoss_layer_cuda_matches_cpu(variant: str) -> None:
     torch.manual_seed(3)
-    layer_cpu = DampedLinOSSLayer(ssm_size=5, hidden_dim=4)
+    layer_cpu = DampedLinOSSLayer(ssm_size=5, hidden_dim=4, variant=variant)
     inputs_cpu = torch.randn(2, 9, 4)
 
     reference = layer_cpu(inputs_cpu)
 
-    layer_cuda = DampedLinOSSLayer(ssm_size=5, hidden_dim=4).cuda()
+    layer_cuda = DampedLinOSSLayer(ssm_size=5, hidden_dim=4, variant=variant).cuda()
     layer_cuda.load_state_dict(layer_cpu.state_dict())
     inputs_cuda = inputs_cpu.cuda()
 
@@ -118,9 +131,10 @@ def test_dlinoss_layer_cuda_matches_cpu() -> None:
     torch.testing.assert_close(outputs_cuda, reference, rtol=1e-5, atol=1e-6)
 
 
-def test_dlinoss_gradients_flow() -> None:
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_dlinoss_gradients_flow(variant: str) -> None:
     torch.manual_seed(5)
-    layer = DampedLinOSSLayer(ssm_size=4, hidden_dim=3)
+    layer = DampedLinOSSLayer(ssm_size=4, hidden_dim=3, variant=variant)
     inputs = torch.randn(2, 7, 3, requires_grad=True)
 
     output = layer(inputs).sum()
