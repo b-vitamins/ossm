@@ -25,17 +25,20 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterable, List, Tuple, Dict, Any, Optional
 from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import torch
 import json
 import shutil
-from contextlib import contextmanager
+import statistics
+
+import torch
 
 
 # Ensure repository src/ is on sys.path so `ossm` can be imported without installation
@@ -255,7 +258,64 @@ def make_inputs(T: int, B: int, S: int, device: torch.device, *, raw_params: boo
     return a, g, step, bu
 
 
-def cuda_timing(repeats: int, fn) -> Tuple[float, float]:
+def _percentile(sorted_vals: List[float], q: float) -> float:
+    if not sorted_vals:
+        return float("nan")
+    if len(sorted_vals) == 1:
+        return float(sorted_vals[0])
+    rank = (len(sorted_vals) - 1) * q
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return float(sorted_vals[int(rank)])
+    lower_val = sorted_vals[lower]
+    upper_val = sorted_vals[upper]
+    return float(lower_val + (upper_val - lower_val) * (rank - lower))
+
+
+def _timing_stats(times: List[float]) -> Dict[str, Any]:
+    if not times:
+        return {
+            "mean_ms": float("nan"),
+            "std_ms": float("nan"),
+            "min_ms": float("nan"),
+            "max_ms": float("nan"),
+            "p05_ms": float("nan"),
+            "p50_ms": float("nan"),
+            "p95_ms": float("nan"),
+            "p99_ms": float("nan"),
+            "mad_ms": float("nan"),
+            "cv_pct": float("nan"),
+            "samples_ms": [],
+            "repeats": 0,
+        }
+    sorted_vals = sorted(float(t) for t in times)
+    mean_ms = float(statistics.mean(sorted_vals))
+    std_ms = float(statistics.pstdev(sorted_vals)) if len(sorted_vals) > 1 else 0.0
+    median_ms = float(statistics.median(sorted_vals))
+    mad_ms = float(
+        statistics.mean(abs(x - median_ms) for x in sorted_vals)
+        if len(sorted_vals) > 1
+        else 0.0
+    )
+    cv_pct = float((std_ms / mean_ms) * 100.0) if mean_ms > 0 else float("nan")
+    return {
+        "mean_ms": mean_ms,
+        "std_ms": std_ms,
+        "min_ms": float(sorted_vals[0]),
+        "max_ms": float(sorted_vals[-1]),
+        "p05_ms": _percentile(sorted_vals, 0.05),
+        "p50_ms": median_ms,
+        "p95_ms": _percentile(sorted_vals, 0.95),
+        "p99_ms": _percentile(sorted_vals, 0.99),
+        "mad_ms": mad_ms,
+        "cv_pct": cv_pct,
+        "samples_ms": list(sorted_vals),
+        "repeats": len(sorted_vals),
+    }
+
+
+def cuda_timing(repeats: int, fn) -> Dict[str, Any]:
     times: List[float] = []
     for _ in range(repeats):
         start = torch.cuda.Event(enable_timing=True)
@@ -266,23 +326,17 @@ def cuda_timing(repeats: int, fn) -> Tuple[float, float]:
         end.record()
         torch.cuda.synchronize()
         times.append(float(start.elapsed_time(end)))
-    import statistics as _stats
-    mean_ms = float(_stats.mean(times))
-    std_ms = float(_stats.pstdev(times))
-    return mean_ms, std_ms
+    return _timing_stats(times)
 
 
-def cpu_timing(repeats: int, fn) -> Tuple[float, float]:
+def cpu_timing(repeats: int, fn) -> Dict[str, Any]:
     times: List[float] = []
     for _ in range(repeats):
         t0 = time.perf_counter()
         fn()
         t1 = time.perf_counter()
         times.append((t1 - t0) * 1000.0)
-    import statistics as _stats
-    mean_ms = float(_stats.mean(times))
-    std_ms = float(_stats.pstdev(times))
-    return mean_ms, std_ms
+    return _timing_stats(times)
 
 
 def _ops_and_bytes_per_step(variant: str) -> Tuple[int, int]:
@@ -295,7 +349,32 @@ def _ops_and_bytes_per_step(variant: str) -> Tuple[int, int]:
     return flops, bytes_
 
 
-def forward_benchmark(case: Case, device: torch.device, warmup: int, repeats: int, *, raw_params: bool, nvtx: bool) -> Tuple[dict, dict, dict]:
+def _add_timing_enrichments(stats: Dict[str, Any], *, elems: int, steps: int) -> Dict[str, Any]:
+    mean_ms = float(stats.get("mean_ms", float("nan")))
+    stats = dict(stats)
+    stats["ms"] = mean_ms
+    stats.setdefault("std", stats.get("std_ms", float("nan")))
+    if elems > 0 and math.isfinite(mean_ms):
+        stats["ns_per_elem"] = (mean_ms * 1_000_000.0) / elems
+    else:
+        stats["ns_per_elem"] = float("nan")
+    if steps > 0 and math.isfinite(mean_ms):
+        stats["ns_per_step"] = (mean_ms * 1_000_000.0) / steps
+    else:
+        stats["ns_per_step"] = float("nan")
+    stats.setdefault("repeats", len(stats.get("samples_ms", [])))
+    return stats
+
+
+def forward_benchmark(
+    case: Case,
+    device: torch.device,
+    warmup: int,
+    repeats: int,
+    *,
+    raw_params: bool,
+    nvtx: bool,
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     a, g, step, bu = make_inputs(case.T, case.B, case.S, device, raw_params=raw_params)
 
     # Fallback reference (disable kernels explicitly)
@@ -307,7 +386,7 @@ def forward_benchmark(case: Case, device: torch.device, warmup: int, repeats: in
         for _ in range(max(1, warmup)):
             _ = ref_fn()
     with nvtx_range(f"fwd_ref_timing var={case.variant} T={case.T} B={case.B} S={case.S}", enabled=nvtx):
-        ref_t = cuda_timing(repeats, ref_fn) if device.type == "cuda" else cpu_timing(repeats, ref_fn)
+        ref_stats = cuda_timing(repeats, ref_fn) if device.type == "cuda" else cpu_timing(repeats, ref_fn)
 
     # Kernel path
     os.environ.pop("OSSM_DLINOSS_DISABLE_KERNEL", None)
@@ -317,13 +396,19 @@ def forward_benchmark(case: Case, device: torch.device, warmup: int, repeats: in
         for _ in range(max(1, warmup)):
             _ = ker_fn()
     with nvtx_range(f"fwd_ker_timing var={case.variant} T={case.T} B={case.B} S={case.S}", enabled=nvtx):
-        ker_t = cuda_timing(repeats, ker_fn) if device.type == "cuda" else cpu_timing(repeats, ker_fn)
+        ker_stats = cuda_timing(repeats, ker_fn) if device.type == "cuda" else cpu_timing(repeats, ker_fn)
 
     elems = case.T * case.B * case.S
     flops_step, bytes_step = _ops_and_bytes_per_step(case.variant)
+    arith_intensity = flops_step / bytes_step if bytes_step else float("inf")
+    ref_stats = _add_timing_enrichments(ref_stats, elems=elems, steps=case.T)
+    ker_stats = _add_timing_enrichments(ker_stats, elems=elems, steps=case.T)
+
     # Timings
-    ref_ms, ref_std = ref_t
-    ker_ms, ker_std = ker_t
+    ref_ms = ref_stats["ms"]
+    ref_std = ref_stats["std"]
+    ker_ms = ker_stats["ms"]
+    ker_std = ker_stats["std"]
     # Throughput
     ref_tps = elems / (ref_ms / 1000.0)
     ker_tps = elems / (ker_ms / 1000.0)
@@ -346,10 +431,39 @@ def forward_benchmark(case: Case, device: torch.device, warmup: int, repeats: in
         finite_ref = torch.isfinite(y_ref).float().mean().item()
         finite_ker = torch.isfinite(y_ker).float().mean().item()
 
-    ref = {"ms": ref_ms, "std": ref_std, "tps": ref_tps, "GBs": ref_gbs, "GFLOPs": ref_gflops}
-    ker = {"ms": ker_ms, "std": ker_std, "tps": ker_tps, "GBs": ker_gbs, "GFLOPs": ker_gflops}
-    err = {"out_rel_max": out_rel, "max|y_ref|": max_ref, "max|y_ker|": max_ker, "finite_ref": finite_ref, "finite_ker": finite_ker}
-    return ref, ker, err
+    ref = {
+        **ref_stats,
+        "ms": ref_ms,
+        "std": ref_std,
+        "tps": ref_tps,
+        "GBs": ref_gbs,
+        "GFLOPs": ref_gflops,
+    }
+    ker = {
+        **ker_stats,
+        "ms": ker_ms,
+        "std": ker_std,
+        "tps": ker_tps,
+        "GBs": ker_gbs,
+        "GFLOPs": ker_gflops,
+    }
+    ker["speedup_vs_ref"] = (ref_ms / ker_ms) if ker_ms > 0 else float("inf")
+    err = {
+        "out_rel_max": out_rel,
+        "max|y_ref|": max_ref,
+        "max|y_ker|": max_ker,
+        "finite_ref": finite_ref,
+        "finite_ker": finite_ker,
+    }
+    extras = {
+        "elems": elems,
+        "total_bytes": total_bytes,
+        "total_flops": total_flops,
+        "flops_per_step": flops_step,
+        "bytes_per_step": bytes_step,
+        "arith_intensity": arith_intensity,
+    }
+    return ref, ker, err, extras
 
 
 def numeric_and_backward(case: Case, device: torch.device, *, raw_params: bool, nvtx: bool) -> Tuple[dict, dict, dict, dict]:
@@ -508,6 +622,108 @@ def _append_jsonl(path: Path, record: dict) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _case_label(case: Case) -> str:
+    return f"var={case.variant} T={case.T} B={case.B} S={case.S}"
+
+
+def _fmt_value(value: float, unit: str = "", precision: int = 3) -> str:
+    if not math.isfinite(value):
+        return f"nan{unit}"
+    return f"{format(value, f'.{precision}f')}{unit}"
+
+
+def _fmt_ratio(value: float) -> str:
+    if not math.isfinite(value):
+        return "nan"
+    if value == float("inf"):
+        return "inf"
+    return f"{value:.2f}x"
+
+
+def _print_summary_tables(results: List[Dict[str, Any]], *, top: int) -> None:
+    if top <= 0:
+        return
+    print("\n[summary] slowest kernel cases (mean ms)")
+    ranked = sorted(results, key=lambda r: r["ker"].get("ms", float("nan")), reverse=True)
+    for row in ranked[:top]:
+        case = row["case"]
+        ker = row["ker"]
+        extras = row.get("extras", {})
+        ai = extras.get("arith_intensity", float("nan"))
+        print(
+            f"  {_case_label(case)} ker={_fmt_value(ker.get('ms', float('nan')), 'ms')} "
+            f"p95={_fmt_value(ker.get('p95_ms', float('nan')), 'ms')} cv={_fmt_value(ker.get('cv_pct', float('nan')), '%', precision=1)} "
+            f"ns/elem={_fmt_value(ker.get('ns_per_elem', float('nan')), 'ns', precision=1)} speedup={_fmt_ratio(ker.get('speedup_vs_ref', float('nan')))} "
+            f"GB/s={_fmt_value(ker.get('GBs', float('nan')), 'GB/s')} GF/s={_fmt_value(ker.get('GFLOPs', float('nan')), 'GF/s')} AI={_fmt_value(ai, 'F/B', precision=2)}"
+        )
+
+    jitter_rank = [
+        (
+            row["case"],
+            row["ker"].get("p95_ms", float("nan")) - row["ker"].get("p05_ms", float("nan")),
+            row["ker"].get("cv_pct", float("nan")),
+            row["ker"],
+        )
+        for row in results
+    ]
+    jitter_rank = [entry for entry in jitter_rank if math.isfinite(entry[1])]
+    if jitter_rank:
+        jitter_rank.sort(key=lambda x: x[1], reverse=True)
+        print("\n[summary] highest kernel jitter (p95-p05 ms)")
+        for case, span, cv_pct, ker in jitter_rank[:top]:
+            print(
+                f"  {_case_label(case)} span={_fmt_value(span, 'ms')} cv={_fmt_value(cv_pct, '%', precision=1)} "
+                f"min={_fmt_value(ker.get('min_ms', float('nan')), 'ms')} max={_fmt_value(ker.get('max_ms', float('nan')), 'ms')}"
+            )
+
+    err_rank = [
+        (row["case"], row["err"].get("out_rel_max", 0.0), row["err"])
+        for row in results
+    ]
+    err_rank = [entry for entry in err_rank if math.isfinite(entry[1])]
+    if err_rank:
+        err_rank.sort(key=lambda x: x[1], reverse=True)
+        print("\n[summary] largest forward relative error (kernel vs reference)")
+        for case, rel_err, err in err_rank[:top]:
+            print(
+                f"  {_case_label(case)} rel_err={rel_err:.2e} max|ref|={err.get('max|y_ref|', float('nan')):.2e} "
+                f"max|ker|={err.get('max|y_ker|', float('nan')):.2e}"
+            )
+
+    backward_rows = [row for row in results if row.get("backward")]
+    if backward_rows:
+        slowest_bwd = sorted(
+            backward_rows,
+            key=lambda r: r["backward"]["bwd_ker"].get("ms", float("nan")),
+            reverse=True,
+        )
+        print("\n[summary] slowest backward cases (kernel path)")
+        for row in slowest_bwd[:top]:
+            case = row["case"]
+            bwd = row["backward"]
+            ker_ms = bwd["bwd_ker"].get("ms", float("nan"))
+            speed = bwd.get("bwd_speedup", float("nan"))
+            alloc = bwd.get("alloc", 0)
+            print(
+                f"  {_case_label(case)} ker={_fmt_value(ker_ms, 'ms')} speedup={_fmt_ratio(speed)} alloc={human_bytes(int(alloc))}"
+            )
+
+        grad_rank = []
+        for row in backward_rows:
+            grad_err = row["backward"].get("grad_err")
+            if not grad_err:
+                continue
+            max_rel = max((val.get("rel_max", 0.0) for val in grad_err.values()), default=0.0)
+            grad_rank.append((row["case"], max_rel, grad_err))
+        grad_rank = [entry for entry in grad_rank if math.isfinite(entry[1])]
+        if grad_rank:
+            grad_rank.sort(key=lambda x: x[1], reverse=True)
+            print("\n[summary] largest gradient relative error (kernel vs reference)")
+            for case, rel, grad_err in grad_rank[:top]:
+                parts = ", ".join(f"{name}={vals.get('rel_max', float('nan')):.2e}" for name, vals in grad_err.items())
+                print(f"  {_case_label(case)} rel_max={rel:.2e} [{parts}]")
+
+
 def main(argv: Iterable[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Benchmark D-LinOSS kernels (forward/backward, bandwidth, agreement)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
@@ -525,6 +741,8 @@ def main(argv: Iterable[str] | None = None) -> None:
     parser.add_argument("--out-dir", type=str, default=None, help="Directory for slot files old.jsonl/new.jsonl; defaults to outputs/bench_dlinoss")
     parser.add_argument("--diff-only", action="store_true", help="Only print performance diff between slot files and exit")
     parser.add_argument("--top", type=int, default=5, help="Top-N improvements/regressions to display in diffs")
+    parser.add_argument("--summary-top", type=int, default=8, help="Number of cases to show per summary section")
+    parser.add_argument("--no-summary", action="store_true", help="Disable aggregated summary tables")
     parser.add_argument("--no-nvtx", action="store_true", help="Disable NVTX ranges emission")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -534,7 +752,12 @@ def main(argv: Iterable[str] | None = None) -> None:
 
     print("[env]", env_info())
     print("[kernels]", kernel_info())
-    print(f"[config] variants={args.variants} lengths={args.lengths} batches={args.batches} ssms={args.ssms} repeats={args.repeats} warmup={args.warmup} stable_params={not args.raw_params} seed={args.seed} nvtx={'off' if args.no_nvtx else 'on'}")
+    summary_cfg = "off" if args.no_summary else args.summary_top
+    print(
+        f"[config] variants={args.variants} lengths={args.lengths} batches={args.batches} ssms={args.ssms} repeats={args.repeats} "
+        f"warmup={args.warmup} stable_params={not args.raw_params} seed={args.seed} nvtx={'off' if args.no_nvtx else 'on'} "
+        f"summary_top={summary_cfg}"
+    )
 
     if device.type == "cpu" and any(dlinoss_has_kernels(v) for v in args.variants):
         print("[note] CUDA kernels exist but device=cpu; kernel path will fall back to reference.")
@@ -585,21 +808,36 @@ def main(argv: Iterable[str] | None = None) -> None:
         return
 
     nvtx_on = not args.no_nvtx
+    all_results: List[Dict[str, Any]] = []
     for v in args.variants:
         for S in args.ssms:
             for B in args.batches:
                 for T in args.lengths:
                     case = Case(variant=v, T=T, B=B, S=S)
                     with nvtx_range(f"case var={v} T={T} B={B} S={S}", enabled=nvtx_on):
-                        ref, ker, err = forward_benchmark(case, device, warmup=args.warmup, repeats=args.repeats, raw_params=args.raw_params, nvtx=nvtx_on)
-                        speed = ref["ms"] / ker["ms"] if ker["ms"] > 0 else float('inf')
+                        ref, ker, err, extras = forward_benchmark(
+                            case,
+                            device,
+                            warmup=args.warmup,
+                            repeats=args.repeats,
+                            raw_params=args.raw_params,
+                            nvtx=nvtx_on,
+                        )
+                        speed = ker.get("speedup_vs_ref", float("nan"))
+                        ref_p95 = ref.get("p95_ms", float("nan"))
+                        ker_p95 = ker.get("p95_ms", float("nan"))
+                        ref_cv = ref.get("cv_pct", float("nan"))
+                        ker_cv = ker.get("cv_pct", float("nan"))
+                        ker_ns = ker.get("ns_per_elem", float("nan"))
+                        ai = extras.get("arith_intensity", float("nan"))
                         print(
                             f"[fwd] var={v} T={T} B={B} S={S} "
-                            f"ref={ref['ms']:.3f}±{ref['std']:.3f}ms({ref['tps']:.0f}/s {ref['GBs']:.2f}GB/s {ref['GFLOPs']:.2f}GF/s) "
-                            f"ker={ker['ms']:.3f}±{ker['std']:.3f}ms({ker['tps']:.0f}/s {ker['GBs']:.2f}GB/s {ker['GFLOPs']:.2f}GF/s) "
-                            f"speedup={speed:.2f}x rel_err={err['out_rel_max']:.2e} |y|ref={err['max|y_ref|']:.2e} |y|ker={err['max|y_ker|']:.2e} fin(ref,ker)=({err['finite_ref']:.2f},{err['finite_ker']:.2f})"
+                            f"ref={ref['ms']:.3f}±{ref['std']:.3f}ms(p95={ref_p95:.3f} cv={ref_cv:.1f}% {ref['GBs']:.2f}GB/s {ref['GFLOPs']:.2f}GF/s) "
+                            f"ker={ker['ms']:.3f}±{ker['std']:.3f}ms(p95={ker_p95:.3f} cv={ker_cv:.1f}% ns/elem={ker_ns:.1f} {ker['GBs']:.2f}GB/s {ker['GFLOPs']:.2f}GF/s) "
+                            f"speedup={speed:.2f}x AI={ai:.2f}F/B rel_err={err['out_rel_max']:.2e} |y|ref={err['max|y_ref|']:.2e} |y|ker={err['max|y_ker|']:.2e} fin(ref,ker)=({err['finite_ref']:.2f},{err['finite_ker']:.2f})"
                         )
 
+                    backward_payload: Optional[Dict[str, Any]] = None
                     if not args.no_backward:
                         out_err, grad_err, bwd_ref, bwd_ker = numeric_and_backward(case, device, raw_params=args.raw_params, nvtx=nvtx_on)
                         alloc_fwd = peak_memory_forward(case, device, raw_params=args.raw_params, nvtx=nvtx_on) if device.type == "cuda" else 0
@@ -619,6 +857,15 @@ def main(argv: Iterable[str] | None = None) -> None:
                             f"out(max={out_err['max_abs']:.2e},mean={out_err['mean_abs']:.2e},rmse={out_err['rmse']:.2e}) "
                             f"grads[{ge_s}]{fin_s} peak_alloc_fwd={human_bytes(alloc_fwd)} peak_alloc_fwbw={human_bytes(alloc)}"
                         )
+                        backward_payload = {
+                            "out_err": out_err,
+                            "grad_err": grad_err,
+                            "bwd_ref": bwd_ref,
+                            "bwd_ker": bwd_ker,
+                            "bwd_speedup": bwd_speed,
+                            "alloc_fwd": alloc_fwd,
+                            "alloc": alloc,
+                        }
 
                     if out_path is not None:
                         rec: Dict[str, Any] = {
@@ -630,6 +877,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                             "ref": ref,
                             "ker": ker,
                             "err": err,
+                            "workload": extras,
                         }
                         if not args.no_backward:
                             rec.update(
@@ -645,6 +893,18 @@ def main(argv: Iterable[str] | None = None) -> None:
                                 }
                             )
                         _append_jsonl(out_path, rec)
+
+                    all_results.append({
+                        "case": case,
+                        "ref": ref,
+                        "ker": ker,
+                        "err": err,
+                        "extras": extras,
+                        "backward": backward_payload,
+                    })
+
+    if all_results and not args.no_summary:
+        _print_summary_tables(all_results, top=args.summary_top)
 
     # If requested, bootstrap both slots with the same run
     if copy_new_to_old_after and new_path is not None and old_path is not None:
