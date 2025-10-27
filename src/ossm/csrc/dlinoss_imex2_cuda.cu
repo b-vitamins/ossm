@@ -63,26 +63,32 @@ __global__ void dlinoss_imex2_forward_kernel(const typename scalar_t::value_type
 }
 
 template <typename scalar_t>
-__global__ void dlinoss_imex2_backward_kernel(const typename scalar_t::value_type* __restrict__ a_diag,
-                                              const typename scalar_t::value_type* __restrict__ g_diag,
-                                              const typename scalar_t::value_type* __restrict__ step,
-                                              const scalar_t* __restrict__ bu_ptr,
-                                              const scalar_t* __restrict__ states_ptr,
-                                              const scalar_t* __restrict__ grad_out_ptr,
-                                              scalar_t* __restrict__ grad_bu_ptr,
-                                              typename scalar_t::value_type* __restrict__ grad_a_ptr,
-                                              typename scalar_t::value_type* __restrict__ grad_g_ptr,
-                                              typename scalar_t::value_type* __restrict__ grad_step_ptr,
-                                              int64_t length,
-                                              int64_t batch,
-                                              int64_t ssm) {
+__global__ void dlinoss_imex2_backward_tile_kernel(
+    const typename scalar_t::value_type* __restrict__ a_diag,
+    const typename scalar_t::value_type* __restrict__ g_diag,
+    const typename scalar_t::value_type* __restrict__ step,
+    const scalar_t* __restrict__ bu_ptr,
+    const scalar_t* __restrict__ states_ptr,
+    const scalar_t* __restrict__ grad_out_ptr,
+    scalar_t* __restrict__ grad_bu_ptr,
+    typename scalar_t::value_type* __restrict__ grad_a_partial,
+    typename scalar_t::value_type* __restrict__ grad_g_partial,
+    typename scalar_t::value_type* __restrict__ grad_step_partial,
+    int64_t length,
+    int64_t batch,
+    int64_t ssm,
+    int64_t tiles) {
   using value_t = typename scalar_t::value_type;
 
   const int64_t series = batch * ssm;
   const int64_t step_stride = series * 2;
 
-  for (int64_t state = blockIdx.x * blockDim.x + threadIdx.x; state < ssm;
-       state += blockDim.x * gridDim.x) {
+  extern __shared__ unsigned char shared_storage[];
+  value_t* shared_grad_alpha = reinterpret_cast<value_t*>(shared_storage);
+  value_t* shared_grad_gamma = shared_grad_alpha + blockDim.x;
+  value_t* shared_grad_sigma = shared_grad_gamma + blockDim.x;
+
+  for (int64_t state = blockIdx.y; state < ssm; state += gridDim.y) {
     const value_t alpha = a_diag[state];
     const value_t gamma = g_diag[state];
     const value_t sigma = step[state];
@@ -97,93 +103,147 @@ __global__ void dlinoss_imex2_backward_kernel(const typename scalar_t::value_typ
     const value_t d_sigma_prev1 = -value_t(2) * sigma * alpha;
     const value_t d_sigma_bu = value_t(2) * sigma;
 
-    value_t grad_alpha_state = value_t(0);
-    value_t grad_gamma_state = value_t(0);
-    value_t grad_sigma_state = value_t(0);
+    for (int64_t tile = blockIdx.x; tile < tiles; tile += gridDim.x) {
+      const int64_t batch_idx = tile * blockDim.x + threadIdx.x;
 
-    for (int64_t batch_idx = 0; batch_idx < batch; ++batch_idx) {
-      const int64_t series_idx = batch_idx * ssm + state;
+      value_t grad_alpha_local = value_t(0);
+      value_t grad_gamma_local = value_t(0);
+      value_t grad_sigma_local = value_t(0);
 
-      value_t grad_state0_real = value_t(0);
-      value_t grad_state0_imag = value_t(0);
-      value_t grad_state1_real = value_t(0);
-      value_t grad_state1_imag = value_t(0);
+      if (batch_idx < batch) {
+        const int64_t series_idx = batch_idx * ssm + state;
 
-      const scalar_t* bu_series = bu_ptr + (length - 1) * series + series_idx;
-      const scalar_t* grad_out_series = grad_out_ptr + (length - 1) * series + series_idx;
-      scalar_t* grad_bu_series = grad_bu_ptr + (length - 1) * series + series_idx;
-      const scalar_t* prev_states =
-          length > 1 ? states_ptr + (length - 2) * step_stride + series_idx * 2 : nullptr;
+        value_t grad_state0_real = value_t(0);
+        value_t grad_state0_imag = value_t(0);
+        value_t grad_state1_real = value_t(0);
+        value_t grad_state1_imag = value_t(0);
 
-      for (int64_t t = length - 1; t >= 0; --t) {
-        const scalar_t grad_out_val = *grad_out_series;
-        const scalar_t bu_val = *bu_series;
+        const scalar_t* bu_series = bu_ptr + (length - 1) * series + series_idx;
+        const scalar_t* grad_out_series = grad_out_ptr + (length - 1) * series + series_idx;
+        scalar_t* grad_bu_series = grad_bu_ptr + (length - 1) * series + series_idx;
+        const scalar_t* prev_states =
+            length > 1 ? states_ptr + (length - 2) * step_stride + series_idx * 2 : nullptr;
 
-        value_t prev0_real = value_t(0);
-        value_t prev0_imag = value_t(0);
-        value_t prev1_real = value_t(0);
-        value_t prev1_imag = value_t(0);
-        if (t > 0 && prev_states != nullptr) {
-          const scalar_t prev0_val = prev_states[0];
-          const scalar_t prev1_val = prev_states[1];
-          prev0_real = prev0_val.real();
-          prev0_imag = prev0_val.imag();
-          prev1_real = prev1_val.real();
-          prev1_imag = prev1_val.imag();
+        for (int64_t t = length - 1; t >= 0; --t) {
+          const scalar_t grad_out_val = *grad_out_series;
+          const scalar_t bu_val = *bu_series;
+
+          value_t prev0_real = value_t(0);
+          value_t prev0_imag = value_t(0);
+          value_t prev1_real = value_t(0);
+          value_t prev1_imag = value_t(0);
+          if (t > 0 && prev_states != nullptr) {
+            const scalar_t prev0_val = prev_states[0];
+            const scalar_t prev1_val = prev_states[1];
+            prev0_real = prev0_val.real();
+            prev0_imag = prev0_val.imag();
+            prev1_real = prev1_val.real();
+            prev1_imag = prev1_val.imag();
+          }
+
+          const value_t grad_out_real = grad_out_val.real();
+          const value_t grad_out_imag = grad_out_val.imag();
+          const value_t bu_real = bu_val.real();
+          const value_t bu_imag = bu_val.imag();
+
+          const value_t grad_new1_real = grad_state1_real + grad_out_real;
+          const value_t grad_new1_imag = grad_state1_imag + grad_out_imag;
+          const value_t grad_new0_real = grad_state0_real;
+          const value_t grad_new0_imag = grad_state0_imag;
+
+          grad_alpha_local += (-sigma) * (grad_new0_real * prev1_real + grad_new0_imag * prev1_imag);
+          grad_alpha_local += (-sigma_sq) * (grad_new1_real * prev1_real + grad_new1_imag * prev1_imag);
+
+          grad_gamma_local += (-sigma) * (grad_new0_real * prev0_real + grad_new0_imag * prev0_imag);
+          grad_gamma_local += (-sigma_sq) * (grad_new1_real * prev0_real + grad_new1_imag * prev0_imag);
+
+          const value_t sigma_term_real = prev0_real * (-gamma) + prev1_real * (-alpha) + bu_real;
+          const value_t sigma_term_imag = prev0_imag * (-gamma) + prev1_imag * (-alpha) + bu_imag;
+          grad_sigma_local += grad_new0_real * sigma_term_real + grad_new0_imag * sigma_term_imag;
+
+          const value_t sigma_grad_term_real =
+              prev0_real * d_sigma_prev0 + prev1_real * d_sigma_prev1 + bu_real * d_sigma_bu;
+          const value_t sigma_grad_term_imag =
+              prev0_imag * d_sigma_prev0 + prev1_imag * d_sigma_prev1 + bu_imag * d_sigma_bu;
+          grad_sigma_local += grad_new1_real * sigma_grad_term_real + grad_new1_imag * sigma_grad_term_imag;
+
+          const value_t grad_bu_real = grad_new0_real * sigma + grad_new1_real * sigma_sq;
+          const value_t grad_bu_imag = grad_new0_imag * sigma + grad_new1_imag * sigma_sq;
+          *grad_bu_series = scalar_t(grad_bu_real, grad_bu_imag);
+
+          const value_t next_state0_real = grad_new0_real * m11 + grad_new1_real * m21;
+          const value_t next_state0_imag = grad_new0_imag * m11 + grad_new1_imag * m21;
+          const value_t next_state1_real = grad_new0_real * m12 + grad_new1_real * m22;
+          const value_t next_state1_imag = grad_new0_imag * m12 + grad_new1_imag * m22;
+
+          grad_state0_real = next_state0_real;
+          grad_state0_imag = next_state0_imag;
+          grad_state1_real = next_state1_real;
+          grad_state1_imag = next_state1_imag;
+
+          if (t > 0 && prev_states != nullptr) {
+            prev_states -= step_stride;
+          }
+          bu_series -= series;
+          grad_out_series -= series;
+          grad_bu_series -= series;
         }
-
-        const value_t grad_out_real = grad_out_val.real();
-        const value_t grad_out_imag = grad_out_val.imag();
-        const value_t bu_real = bu_val.real();
-        const value_t bu_imag = bu_val.imag();
-
-        const value_t grad_new1_real = grad_state1_real + grad_out_real;
-        const value_t grad_new1_imag = grad_state1_imag + grad_out_imag;
-        const value_t grad_new0_real = grad_state0_real;
-        const value_t grad_new0_imag = grad_state0_imag;
-
-        grad_alpha_state += (-sigma) * (grad_new0_real * prev1_real + grad_new0_imag * prev1_imag);
-        grad_alpha_state += (-sigma_sq) * (grad_new1_real * prev1_real + grad_new1_imag * prev1_imag);
-
-        grad_gamma_state += (-sigma) * (grad_new0_real * prev0_real + grad_new0_imag * prev0_imag);
-        grad_gamma_state += (-sigma_sq) * (grad_new1_real * prev0_real + grad_new1_imag * prev0_imag);
-
-        const value_t sigma_term_real = prev0_real * (-gamma) + prev1_real * (-alpha) + bu_real;
-        const value_t sigma_term_imag = prev0_imag * (-gamma) + prev1_imag * (-alpha) + bu_imag;
-        grad_sigma_state += grad_new0_real * sigma_term_real + grad_new0_imag * sigma_term_imag;
-
-        const value_t sigma_grad_term_real =
-            prev0_real * d_sigma_prev0 + prev1_real * d_sigma_prev1 + bu_real * d_sigma_bu;
-        const value_t sigma_grad_term_imag =
-            prev0_imag * d_sigma_prev0 + prev1_imag * d_sigma_prev1 + bu_imag * d_sigma_bu;
-        grad_sigma_state += grad_new1_real * sigma_grad_term_real + grad_new1_imag * sigma_grad_term_imag;
-
-        const value_t grad_bu_real = grad_new0_real * sigma + grad_new1_real * sigma_sq;
-        const value_t grad_bu_imag = grad_new0_imag * sigma + grad_new1_imag * sigma_sq;
-        *grad_bu_series = scalar_t(grad_bu_real, grad_bu_imag);
-
-        const value_t next_state0_real = grad_new0_real * m11 + grad_new1_real * m21;
-        const value_t next_state0_imag = grad_new0_imag * m11 + grad_new1_imag * m21;
-        const value_t next_state1_real = grad_new0_real * m12 + grad_new1_real * m22;
-        const value_t next_state1_imag = grad_new0_imag * m12 + grad_new1_imag * m22;
-
-        grad_state0_real = next_state0_real;
-        grad_state0_imag = next_state0_imag;
-        grad_state1_real = next_state1_real;
-        grad_state1_imag = next_state1_imag;
-
-        if (t > 0 && prev_states != nullptr) {
-          prev_states -= step_stride;
-        }
-        bu_series -= series;
-        grad_out_series -= series;
-        grad_bu_series -= series;
       }
+
+      shared_grad_alpha[threadIdx.x] = grad_alpha_local;
+      shared_grad_gamma[threadIdx.x] = grad_gamma_local;
+      shared_grad_sigma[threadIdx.x] = grad_sigma_local;
+      __syncthreads();
+
+      for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+        if (threadIdx.x < offset) {
+          shared_grad_alpha[threadIdx.x] += shared_grad_alpha[threadIdx.x + offset];
+          shared_grad_gamma[threadIdx.x] += shared_grad_gamma[threadIdx.x + offset];
+          shared_grad_sigma[threadIdx.x] += shared_grad_sigma[threadIdx.x + offset];
+        }
+        __syncthreads();
+      }
+
+      if (threadIdx.x == 0) {
+        const int64_t partial_index = state * tiles + tile;
+        grad_a_partial[partial_index] = shared_grad_alpha[0];
+        grad_g_partial[partial_index] = shared_grad_gamma[0];
+        grad_step_partial[partial_index] = shared_grad_sigma[0];
+      }
+
+      __syncthreads();
+    }
+  }
+}
+
+template <typename scalar_t>
+__global__ void dlinoss_imex2_backward_reduce_kernel(
+    const typename scalar_t::value_type* __restrict__ grad_a_partial,
+    const typename scalar_t::value_type* __restrict__ grad_g_partial,
+    const typename scalar_t::value_type* __restrict__ grad_step_partial,
+    typename scalar_t::value_type* __restrict__ grad_a_ptr,
+    typename scalar_t::value_type* __restrict__ grad_g_ptr,
+    typename scalar_t::value_type* __restrict__ grad_step_ptr,
+    int64_t tiles,
+    int64_t ssm) {
+  using value_t = typename scalar_t::value_type;
+
+  for (int64_t state = blockIdx.x * blockDim.x + threadIdx.x; state < ssm;
+       state += blockDim.x * gridDim.x) {
+    value_t grad_alpha_sum = value_t(0);
+    value_t grad_gamma_sum = value_t(0);
+    value_t grad_sigma_sum = value_t(0);
+
+    for (int64_t tile = 0; tile < tiles; ++tile) {
+      const int64_t partial_index = state * tiles + tile;
+      grad_alpha_sum += grad_a_partial[partial_index];
+      grad_gamma_sum += grad_g_partial[partial_index];
+      grad_sigma_sum += grad_step_partial[partial_index];
     }
 
-    grad_a_ptr[state] = grad_alpha_state;
-    grad_g_ptr[state] = grad_gamma_state;
-    grad_step_ptr[state] = grad_sigma_state;
+    grad_a_ptr[state] = grad_alpha_sum;
+    grad_g_ptr[state] = grad_gamma_sum;
+    grad_step_ptr[state] = grad_sigma_sum;
   }
 }
 
@@ -234,35 +294,72 @@ void dlinoss_imex2_backward_cuda(const at::Tensor& a_diag,
                                  at::Tensor& grad_bu) {
   c10::cuda::OptionalCUDAGuard device_guard{bu.device()};
 
+  const auto length = bu.size(0);
   const auto batch = bu.size(1);
   const auto ssm = bu.size(2);
-  const auto series = batch * ssm;
+  if (batch == 0) {
+    grad_a.zero_();
+    grad_g.zero_();
+    grad_step.zero_();
+    grad_bu.zero_();
+    return;
+  }
 
-  constexpr int64_t threads = 256;
-  const int64_t blocks = std::max<int64_t>(
-      1,
-      std::min<int64_t>(
-          (series + threads - 1) / threads,
-          at::cuda::getCurrentDeviceProperties()->maxGridSize[0]));
+  const auto* props = at::cuda::getCurrentDeviceProperties();
+  const int64_t max_threads = props->maxThreadsPerBlock;
+  int64_t target_threads = std::min<int64_t>(batch, max_threads);
+  int64_t threads = 1;
+  while (threads < target_threads && threads < max_threads) {
+    threads <<= 1;
+  }
+  threads = std::min<int64_t>(threads, max_threads);
+  const int64_t tiles = (batch + threads - 1) / threads;
+  const int64_t max_grid_x = props->maxGridSize[0];
+  const int64_t max_grid_y = props->maxGridSize[1];
+  const int64_t grid_x = std::max<int64_t>(1, std::min<int64_t>(tiles, max_grid_x));
+  const int64_t grid_y = std::max<int64_t>(1, std::min<int64_t>(ssm, max_grid_y));
+  const int64_t reduce_threads = 256;
+  const int64_t reduce_blocks = std::max<int64_t>(
+      1, std::min<int64_t>((ssm + reduce_threads - 1) / reduce_threads, max_grid_x));
+
+  auto grad_a_partial = at::empty({ssm, tiles}, grad_a.options());
+  auto grad_g_partial = at::empty({ssm, tiles}, grad_g.options());
+  auto grad_step_partial = at::empty({ssm, tiles}, grad_step.options());
 
   grad_a.zero_();
   grad_g.zero_();
   grad_step.zero_();
 
+  auto stream = at::cuda::getCurrentCUDAStream();
+
   AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "dlinoss_imex2_backward_cuda", [&] {
-    dlinoss_imex2_backward_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-        a_diag.data_ptr<typename scalar_t::value_type>(),
-        g_diag.data_ptr<typename scalar_t::value_type>(),
-        step.data_ptr<typename scalar_t::value_type>(),
+    using value_t = typename scalar_t::value_type;
+    const size_t shared_mem_size = static_cast<size_t>(threads) * 3 * sizeof(value_t);
+    dim3 blocks(grid_x, grid_y);
+    dlinoss_imex2_backward_tile_kernel<scalar_t><<<blocks, threads, shared_mem_size, stream>>>(
+        a_diag.data_ptr<value_t>(),
+        g_diag.data_ptr<value_t>(),
+        step.data_ptr<value_t>(),
         bu.data_ptr<scalar_t>(),
         states.data_ptr<scalar_t>(),
         grad_output.data_ptr<scalar_t>(),
         grad_bu.data_ptr<scalar_t>(),
-        grad_a.data_ptr<typename scalar_t::value_type>(),
-        grad_g.data_ptr<typename scalar_t::value_type>(),
-        grad_step.data_ptr<typename scalar_t::value_type>(),
-        bu.size(0),
+        grad_a_partial.data_ptr<value_t>(),
+        grad_g_partial.data_ptr<value_t>(),
+        grad_step_partial.data_ptr<value_t>(),
+        length,
         batch,
+        ssm,
+        tiles);
+
+    dlinoss_imex2_backward_reduce_kernel<scalar_t><<<reduce_blocks, reduce_threads, 0, stream>>>(
+        grad_a_partial.data_ptr<value_t>(),
+        grad_g_partial.data_ptr<value_t>(),
+        grad_step_partial.data_ptr<value_t>(),
+        grad_a.data_ptr<value_t>(),
+        grad_g.data_ptr<value_t>(),
+        grad_step.data_ptr<value_t>(),
+        tiles,
         ssm);
   });
 
