@@ -1,4 +1,4 @@
-#include <ATen/AccumulateType.h>
+#include <ATen/OpMathType.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/Exceptions.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -80,15 +80,15 @@ __global__ void dlinoss_imex2_backward_kernel(
     typename scalar_t::value_type *__restrict__ grad_step_ptr, int64_t length,
     int64_t batch, int64_t ssm) {
   using value_t = typename scalar_t::value_type;
-  using acc_t = at::acc_type<value_t, /*is_cuda=*/true>;
+  using acc_t = at::opmath_t<value_t>;
 
   const int64_t series = batch * ssm;
   const int64_t step_stride = series * 2;
 
-  extern __shared__ __align__(sizeof(value_t)) unsigned char shared_buffer[];
-  value_t *shared_grad_alpha = reinterpret_cast<value_t *>(shared_buffer);
-  value_t *shared_grad_gamma = shared_grad_alpha + blockDim.x;
-  value_t *shared_grad_sigma = shared_grad_gamma + blockDim.x;
+  extern __shared__ __align__(sizeof(acc_t)) unsigned char shared_buffer[];
+  acc_t *shared_grad_alpha = reinterpret_cast<acc_t *>(shared_buffer);
+  acc_t *shared_grad_gamma = shared_grad_alpha + blockDim.x;
+  acc_t *shared_grad_sigma = shared_grad_gamma + blockDim.x;
 
   for (int64_t state = blockIdx.x; state < ssm; state += gridDim.x) {
     const acc_t alpha = static_cast<acc_t>(a_diag[state]);
@@ -210,9 +210,9 @@ __global__ void dlinoss_imex2_backward_kernel(
       }
     }
 
-    shared_grad_alpha[threadIdx.x] = static_cast<value_t>(grad_alpha_local);
-    shared_grad_gamma[threadIdx.x] = static_cast<value_t>(grad_gamma_local);
-    shared_grad_sigma[threadIdx.x] = static_cast<value_t>(grad_sigma_local);
+    shared_grad_alpha[threadIdx.x] = grad_alpha_local;
+    shared_grad_gamma[threadIdx.x] = grad_gamma_local;
+    shared_grad_sigma[threadIdx.x] = grad_sigma_local;
     __syncthreads();
 
     for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
@@ -228,9 +228,9 @@ __global__ void dlinoss_imex2_backward_kernel(
     }
 
     if (threadIdx.x == 0) {
-      grad_a_ptr[state] = shared_grad_alpha[0];
-      grad_g_ptr[state] = shared_grad_gamma[0];
-      grad_step_ptr[state] = shared_grad_sigma[0];
+      grad_a_ptr[state] = static_cast<value_t>(shared_grad_alpha[0]);
+      grad_g_ptr[state] = static_cast<value_t>(shared_grad_gamma[0]);
+      grad_step_ptr[state] = static_cast<value_t>(shared_grad_sigma[0]);
     }
 
     __syncthreads();
@@ -294,7 +294,7 @@ void dlinoss_imex2_backward_cuda(const at::Tensor &a_diag,
   AT_DISPATCH_COMPLEX_TYPES(
       bu.scalar_type(), "dlinoss_imex2_backward_cuda", [&] {
         const size_t shared_mem_size = static_cast<size_t>(threads) * 3 *
-                                       sizeof(typename scalar_t::value_type);
+                                       sizeof(at::opmath_t<typename scalar_t::value_type>);
         dlinoss_imex2_backward_kernel<scalar_t>
             <<<blocks, threads, shared_mem_size,
                at::cuda::getCurrentCUDAStream()>>>(
