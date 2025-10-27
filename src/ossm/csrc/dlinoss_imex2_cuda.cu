@@ -81,9 +81,8 @@ __global__ void dlinoss_imex2_backward_kernel(const typename scalar_t::value_typ
   const int64_t series = batch * ssm;
   const int64_t step_stride = series * 2;
 
-  for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < series; idx += blockDim.x * gridDim.x) {
-    const int64_t state = idx % ssm;
-
+  for (int64_t state = blockIdx.x * blockDim.x + threadIdx.x; state < ssm;
+       state += blockDim.x * gridDim.x) {
     const value_t alpha = a_diag[state];
     const value_t gamma = g_diag[state];
     const value_t sigma = step[state];
@@ -98,87 +97,93 @@ __global__ void dlinoss_imex2_backward_kernel(const typename scalar_t::value_typ
     const value_t d_sigma_prev1 = -value_t(2) * sigma * alpha;
     const value_t d_sigma_bu = value_t(2) * sigma;
 
-    value_t grad_state0_real = value_t(0);
-    value_t grad_state0_imag = value_t(0);
-    value_t grad_state1_real = value_t(0);
-    value_t grad_state1_imag = value_t(0);
+    value_t grad_alpha_state = value_t(0);
+    value_t grad_gamma_state = value_t(0);
+    value_t grad_sigma_state = value_t(0);
 
-    value_t grad_alpha_local = value_t(0);
-    value_t grad_gamma_local = value_t(0);
-    value_t grad_sigma_local = value_t(0);
+    for (int64_t batch_idx = 0; batch_idx < batch; ++batch_idx) {
+      const int64_t series_idx = batch_idx * ssm + state;
 
-    const scalar_t* bu_series = bu_ptr + (length - 1) * series + idx;
-    const scalar_t* grad_out_series = grad_out_ptr + (length - 1) * series + idx;
-    scalar_t* grad_bu_series = grad_bu_ptr + (length - 1) * series + idx;
-    const scalar_t* prev_states =
-        length > 1 ? states_ptr + (length - 2) * step_stride + idx * 2 : nullptr;
+      value_t grad_state0_real = value_t(0);
+      value_t grad_state0_imag = value_t(0);
+      value_t grad_state1_real = value_t(0);
+      value_t grad_state1_imag = value_t(0);
 
-    for (int64_t t = length - 1; t >= 0; --t) {
-      const scalar_t grad_out_val = *grad_out_series;
-      const scalar_t bu_val = *bu_series;
+      const scalar_t* bu_series = bu_ptr + (length - 1) * series + series_idx;
+      const scalar_t* grad_out_series = grad_out_ptr + (length - 1) * series + series_idx;
+      scalar_t* grad_bu_series = grad_bu_ptr + (length - 1) * series + series_idx;
+      const scalar_t* prev_states =
+          length > 1 ? states_ptr + (length - 2) * step_stride + series_idx * 2 : nullptr;
 
-      value_t prev0_real = value_t(0);
-      value_t prev0_imag = value_t(0);
-      value_t prev1_real = value_t(0);
-      value_t prev1_imag = value_t(0);
-      if (t > 0 && prev_states != nullptr) {
-        const scalar_t prev0_val = prev_states[0];
-        const scalar_t prev1_val = prev_states[1];
-        prev0_real = prev0_val.real();
-        prev0_imag = prev0_val.imag();
-        prev1_real = prev1_val.real();
-        prev1_imag = prev1_val.imag();
+      for (int64_t t = length - 1; t >= 0; --t) {
+        const scalar_t grad_out_val = *grad_out_series;
+        const scalar_t bu_val = *bu_series;
+
+        value_t prev0_real = value_t(0);
+        value_t prev0_imag = value_t(0);
+        value_t prev1_real = value_t(0);
+        value_t prev1_imag = value_t(0);
+        if (t > 0 && prev_states != nullptr) {
+          const scalar_t prev0_val = prev_states[0];
+          const scalar_t prev1_val = prev_states[1];
+          prev0_real = prev0_val.real();
+          prev0_imag = prev0_val.imag();
+          prev1_real = prev1_val.real();
+          prev1_imag = prev1_val.imag();
+        }
+
+        const value_t grad_out_real = grad_out_val.real();
+        const value_t grad_out_imag = grad_out_val.imag();
+        const value_t bu_real = bu_val.real();
+        const value_t bu_imag = bu_val.imag();
+
+        const value_t grad_new1_real = grad_state1_real + grad_out_real;
+        const value_t grad_new1_imag = grad_state1_imag + grad_out_imag;
+        const value_t grad_new0_real = grad_state0_real;
+        const value_t grad_new0_imag = grad_state0_imag;
+
+        grad_alpha_state += (-sigma) * (grad_new0_real * prev1_real + grad_new0_imag * prev1_imag);
+        grad_alpha_state += (-sigma_sq) * (grad_new1_real * prev1_real + grad_new1_imag * prev1_imag);
+
+        grad_gamma_state += (-sigma) * (grad_new0_real * prev0_real + grad_new0_imag * prev0_imag);
+        grad_gamma_state += (-sigma_sq) * (grad_new1_real * prev0_real + grad_new1_imag * prev0_imag);
+
+        const value_t sigma_term_real = prev0_real * (-gamma) + prev1_real * (-alpha) + bu_real;
+        const value_t sigma_term_imag = prev0_imag * (-gamma) + prev1_imag * (-alpha) + bu_imag;
+        grad_sigma_state += grad_new0_real * sigma_term_real + grad_new0_imag * sigma_term_imag;
+
+        const value_t sigma_grad_term_real =
+            prev0_real * d_sigma_prev0 + prev1_real * d_sigma_prev1 + bu_real * d_sigma_bu;
+        const value_t sigma_grad_term_imag =
+            prev0_imag * d_sigma_prev0 + prev1_imag * d_sigma_prev1 + bu_imag * d_sigma_bu;
+        grad_sigma_state += grad_new1_real * sigma_grad_term_real + grad_new1_imag * sigma_grad_term_imag;
+
+        const value_t grad_bu_real = grad_new0_real * sigma + grad_new1_real * sigma_sq;
+        const value_t grad_bu_imag = grad_new0_imag * sigma + grad_new1_imag * sigma_sq;
+        *grad_bu_series = scalar_t(grad_bu_real, grad_bu_imag);
+
+        const value_t next_state0_real = grad_new0_real * m11 + grad_new1_real * m21;
+        const value_t next_state0_imag = grad_new0_imag * m11 + grad_new1_imag * m21;
+        const value_t next_state1_real = grad_new0_real * m12 + grad_new1_real * m22;
+        const value_t next_state1_imag = grad_new0_imag * m12 + grad_new1_imag * m22;
+
+        grad_state0_real = next_state0_real;
+        grad_state0_imag = next_state0_imag;
+        grad_state1_real = next_state1_real;
+        grad_state1_imag = next_state1_imag;
+
+        if (t > 0 && prev_states != nullptr) {
+          prev_states -= step_stride;
+        }
+        bu_series -= series;
+        grad_out_series -= series;
+        grad_bu_series -= series;
       }
-
-      const value_t grad_out_real = grad_out_val.real();
-      const value_t grad_out_imag = grad_out_val.imag();
-      const value_t bu_real = bu_val.real();
-      const value_t bu_imag = bu_val.imag();
-
-      const value_t grad_new1_real = grad_state1_real + grad_out_real;
-      const value_t grad_new1_imag = grad_state1_imag + grad_out_imag;
-      const value_t grad_new0_real = grad_state0_real;
-      const value_t grad_new0_imag = grad_state0_imag;
-
-      grad_alpha_local += (-sigma) * (grad_new0_real * prev1_real + grad_new0_imag * prev1_imag);
-      grad_alpha_local += (-sigma_sq) * (grad_new1_real * prev1_real + grad_new1_imag * prev1_imag);
-
-      grad_gamma_local += (-sigma) * (grad_new0_real * prev0_real + grad_new0_imag * prev0_imag);
-      grad_gamma_local += (-sigma_sq) * (grad_new1_real * prev0_real + grad_new1_imag * prev0_imag);
-
-      const value_t sigma_term_real = prev0_real * (-gamma) + prev1_real * (-alpha) + bu_real;
-      const value_t sigma_term_imag = prev0_imag * (-gamma) + prev1_imag * (-alpha) + bu_imag;
-      grad_sigma_local += grad_new0_real * sigma_term_real + grad_new0_imag * sigma_term_imag;
-
-      const value_t sigma_grad_term_real = prev0_real * d_sigma_prev0 + prev1_real * d_sigma_prev1 + bu_real * d_sigma_bu;
-      const value_t sigma_grad_term_imag = prev0_imag * d_sigma_prev0 + prev1_imag * d_sigma_prev1 + bu_imag * d_sigma_bu;
-      grad_sigma_local += grad_new1_real * sigma_grad_term_real + grad_new1_imag * sigma_grad_term_imag;
-
-      const value_t grad_bu_real = grad_new0_real * sigma + grad_new1_real * sigma_sq;
-      const value_t grad_bu_imag = grad_new0_imag * sigma + grad_new1_imag * sigma_sq;
-      *grad_bu_series = scalar_t(grad_bu_real, grad_bu_imag);
-
-      const value_t next_state0_real = grad_new0_real * m11 + grad_new1_real * m21;
-      const value_t next_state0_imag = grad_new0_imag * m11 + grad_new1_imag * m21;
-      const value_t next_state1_real = grad_new0_real * m12 + grad_new1_real * m22;
-      const value_t next_state1_imag = grad_new0_imag * m12 + grad_new1_imag * m22;
-
-      grad_state0_real = next_state0_real;
-      grad_state0_imag = next_state0_imag;
-      grad_state1_real = next_state1_real;
-      grad_state1_imag = next_state1_imag;
-
-      if (t > 0 && prev_states != nullptr) {
-        prev_states -= step_stride;
-      }
-      bu_series -= series;
-      grad_out_series -= series;
-      grad_bu_series -= series;
     }
 
-    atomicAdd(grad_a_ptr + state, grad_alpha_local);
-    atomicAdd(grad_g_ptr + state, grad_gamma_local);
-    atomicAdd(grad_step_ptr + state, grad_sigma_local);
+    grad_a_ptr[state] = grad_alpha_state;
+    grad_g_ptr[state] = grad_gamma_state;
+    grad_step_ptr[state] = grad_sigma_state;
   }
 }
 
