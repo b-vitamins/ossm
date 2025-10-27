@@ -81,10 +81,10 @@ __global__ void dlinoss_imex2_backward_kernel(const typename scalar_t::value_typ
   const int64_t series = batch * ssm;
   const int64_t step_stride = series * 2;
 
-  extern __shared__ value_t shared_grad[];
-  value_t* shared_grad_alpha = shared_grad;
-  value_t* shared_grad_gamma = shared_grad + blockDim.x;
-  value_t* shared_grad_sigma = shared_grad + 2 * blockDim.x;
+  extern __shared__ __align__(sizeof(value_t)) unsigned char shared_buffer[];
+  value_t* shared_grad_alpha = reinterpret_cast<value_t*>(shared_buffer);
+  value_t* shared_grad_gamma = shared_grad_alpha + blockDim.x;
+  value_t* shared_grad_sigma = shared_grad_gamma + blockDim.x;
 
   for (int64_t state = blockIdx.x; state < ssm; state += gridDim.x) {
     const value_t alpha = a_diag[state];
