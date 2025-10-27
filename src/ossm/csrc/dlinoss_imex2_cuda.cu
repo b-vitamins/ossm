@@ -81,8 +81,12 @@ __global__ void dlinoss_imex2_backward_kernel(const typename scalar_t::value_typ
   const int64_t series = batch * ssm;
   const int64_t step_stride = series * 2;
 
-  for (int64_t state = blockIdx.x * blockDim.x + threadIdx.x; state < ssm;
-       state += blockDim.x * gridDim.x) {
+  extern __shared__ value_t shared_grad[];
+  value_t* shared_grad_alpha = shared_grad;
+  value_t* shared_grad_gamma = shared_grad + blockDim.x;
+  value_t* shared_grad_sigma = shared_grad + 2 * blockDim.x;
+
+  for (int64_t state = blockIdx.x; state < ssm; state += gridDim.x) {
     const value_t alpha = a_diag[state];
     const value_t gamma = g_diag[state];
     const value_t sigma = step[state];
@@ -97,11 +101,11 @@ __global__ void dlinoss_imex2_backward_kernel(const typename scalar_t::value_typ
     const value_t d_sigma_prev1 = -value_t(2) * sigma * alpha;
     const value_t d_sigma_bu = value_t(2) * sigma;
 
-    value_t grad_alpha_state = value_t(0);
-    value_t grad_gamma_state = value_t(0);
-    value_t grad_sigma_state = value_t(0);
+    value_t grad_alpha_local = value_t(0);
+    value_t grad_gamma_local = value_t(0);
+    value_t grad_sigma_local = value_t(0);
 
-    for (int64_t batch_idx = 0; batch_idx < batch; ++batch_idx) {
+    for (int64_t batch_idx = threadIdx.x; batch_idx < batch; batch_idx += blockDim.x) {
       const int64_t series_idx = batch_idx * ssm + state;
 
       value_t grad_state0_real = value_t(0);
@@ -142,21 +146,21 @@ __global__ void dlinoss_imex2_backward_kernel(const typename scalar_t::value_typ
         const value_t grad_new0_real = grad_state0_real;
         const value_t grad_new0_imag = grad_state0_imag;
 
-        grad_alpha_state += (-sigma) * (grad_new0_real * prev1_real + grad_new0_imag * prev1_imag);
-        grad_alpha_state += (-sigma_sq) * (grad_new1_real * prev1_real + grad_new1_imag * prev1_imag);
+        grad_alpha_local += (-sigma) * (grad_new0_real * prev1_real + grad_new0_imag * prev1_imag);
+        grad_alpha_local += (-sigma_sq) * (grad_new1_real * prev1_real + grad_new1_imag * prev1_imag);
 
-        grad_gamma_state += (-sigma) * (grad_new0_real * prev0_real + grad_new0_imag * prev0_imag);
-        grad_gamma_state += (-sigma_sq) * (grad_new1_real * prev0_real + grad_new1_imag * prev0_imag);
+        grad_gamma_local += (-sigma) * (grad_new0_real * prev0_real + grad_new0_imag * prev0_imag);
+        grad_gamma_local += (-sigma_sq) * (grad_new1_real * prev0_real + grad_new1_imag * prev0_imag);
 
         const value_t sigma_term_real = prev0_real * (-gamma) + prev1_real * (-alpha) + bu_real;
         const value_t sigma_term_imag = prev0_imag * (-gamma) + prev1_imag * (-alpha) + bu_imag;
-        grad_sigma_state += grad_new0_real * sigma_term_real + grad_new0_imag * sigma_term_imag;
+        grad_sigma_local += grad_new0_real * sigma_term_real + grad_new0_imag * sigma_term_imag;
 
         const value_t sigma_grad_term_real =
             prev0_real * d_sigma_prev0 + prev1_real * d_sigma_prev1 + bu_real * d_sigma_bu;
         const value_t sigma_grad_term_imag =
             prev0_imag * d_sigma_prev0 + prev1_imag * d_sigma_prev1 + bu_imag * d_sigma_bu;
-        grad_sigma_state += grad_new1_real * sigma_grad_term_real + grad_new1_imag * sigma_grad_term_imag;
+        grad_sigma_local += grad_new1_real * sigma_grad_term_real + grad_new1_imag * sigma_grad_term_imag;
 
         const value_t grad_bu_real = grad_new0_real * sigma + grad_new1_real * sigma_sq;
         const value_t grad_bu_imag = grad_new0_imag * sigma + grad_new1_imag * sigma_sq;
@@ -181,9 +185,27 @@ __global__ void dlinoss_imex2_backward_kernel(const typename scalar_t::value_typ
       }
     }
 
-    grad_a_ptr[state] = grad_alpha_state;
-    grad_g_ptr[state] = grad_gamma_state;
-    grad_step_ptr[state] = grad_sigma_state;
+    shared_grad_alpha[threadIdx.x] = grad_alpha_local;
+    shared_grad_gamma[threadIdx.x] = grad_gamma_local;
+    shared_grad_sigma[threadIdx.x] = grad_sigma_local;
+    __syncthreads();
+
+    for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+      if (threadIdx.x < offset) {
+        shared_grad_alpha[threadIdx.x] += shared_grad_alpha[threadIdx.x + offset];
+        shared_grad_gamma[threadIdx.x] += shared_grad_gamma[threadIdx.x + offset];
+        shared_grad_sigma[threadIdx.x] += shared_grad_sigma[threadIdx.x + offset];
+      }
+      __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+      grad_a_ptr[state] = shared_grad_alpha[0];
+      grad_g_ptr[state] = shared_grad_gamma[0];
+      grad_step_ptr[state] = shared_grad_sigma[0];
+    }
+
+    __syncthreads();
   }
 }
 
@@ -241,16 +263,15 @@ void dlinoss_imex2_backward_cuda(const at::Tensor& a_diag,
   constexpr int64_t threads = 256;
   const int64_t blocks = std::max<int64_t>(
       1,
-      std::min<int64_t>(
-          (series + threads - 1) / threads,
-          at::cuda::getCurrentDeviceProperties()->maxGridSize[0]));
+      std::min<int64_t>(ssm, at::cuda::getCurrentDeviceProperties()->maxGridSize[0]));
 
   grad_a.zero_();
   grad_g.zero_();
   grad_step.zero_();
 
   AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "dlinoss_imex2_backward_cuda", [&] {
-    dlinoss_imex2_backward_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+    const size_t shared_mem_size = static_cast<size_t>(threads) * 3 * sizeof(typename scalar_t::value_type);
+    dlinoss_imex2_backward_kernel<scalar_t><<<blocks, threads, shared_mem_size, at::cuda::getCurrentCUDAStream()>>>(
         a_diag.data_ptr<typename scalar_t::value_type>(),
         g_diag.data_ptr<typename scalar_t::value_type>(),
         step.data_ptr<typename scalar_t::value_type>(),
