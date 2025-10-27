@@ -226,6 +226,10 @@ void dlinoss_ex_backward_cuda(const at::Tensor& a_diag,
           (series + threads - 1) / threads,
           at::cuda::getCurrentDeviceProperties()->maxGridSize[0]));
 
+  grad_a.zero_();
+  grad_g.zero_();
+  grad_step.zero_();
+
   AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "dlinoss_ex_backward_cuda", [&] {
     dlinoss_ex_backward_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
         a_diag.data_ptr<typename scalar_t::value_type>(),
