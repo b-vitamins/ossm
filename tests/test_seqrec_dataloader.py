@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
+
 from ossm.data.datasets.seqrec import SeqRecEvalDataset, SeqRecTrainDataset, collate_left_pad
 
 
@@ -111,7 +112,7 @@ def test_collate_left_pad_no_pin_memory_even_if_available() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_collate_left_pad_cuda_dtype_and_to() -> None:
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     samples = [
         (
             torch.tensor(0, device=device, dtype=torch.int32),

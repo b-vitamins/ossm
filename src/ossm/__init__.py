@@ -1,5 +1,13 @@
 """OSSM package public exports."""
 
+from __future__ import annotations
+
+import os
+import shutil
+
+if os.environ.get("TORCHINDUCTOR_USE_OPENSSL") is None and shutil.which("openssl") is None:
+    os.environ["TORCHINDUCTOR_USE_OPENSSL"] = "0"
+
 from . import data, metrics
 from .models import (
     AbstractRNNCell,

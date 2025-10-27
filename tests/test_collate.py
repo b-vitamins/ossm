@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from ossm.data.datasets.collate import pad_collate, path_collate, coeff_collate
+from ossm.data.datasets.collate import coeff_collate, pad_collate, path_collate
 
 
 def test_pad_collate_shapes():
@@ -79,7 +79,7 @@ def test_coeff_collate_flat_coeffs():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_pad_collate_preserves_device_cuda():
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     b = [
         {
             "values": torch.randn(5, 3, device=device),
@@ -101,7 +101,7 @@ def test_pad_collate_preserves_device_cuda():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_path_collate_time_grid_device_cuda():
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     b = [
         {
             "features": torch.randn(4, 16, device=device, dtype=torch.float64),
@@ -120,7 +120,7 @@ def test_path_collate_time_grid_device_cuda():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_coeff_collate_mask_device_cuda():
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     b = [
         {
             "times": torch.linspace(0, 1, 6, device=device),
