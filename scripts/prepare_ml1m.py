@@ -1,4 +1,10 @@
-"""Preprocess MovieLens ratings for sequential recommendation experiments."""
+"""Preprocess MovieLens ratings for sequential recommendation experiments.
+
+Matches the Mamba4Rec/RecBole protocol:
+  - Treat all ratings as implicit interactions (no rating threshold).
+  - Apply k‑core filtering with user ≥ min_interactions and item ≥ min_item_interactions
+    before leave‑one‑out splitting. Defaults: 5 and 5.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +16,6 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
-MIN_RATING = 4.0
 SUPPORTED_DATASETS = {
     "ml-1m": "MovieLens 1M",
     "ml-25m": "MovieLens 25M",
@@ -42,12 +47,23 @@ def _build_splits(
     min_user_interactions: int,
     min_item_interactions: int,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray, int]:
-    df = df[df["rating"] >= MIN_RATING].copy()
+    # No rating filter; recency sorting and k‑core filtering only.
     df.sort_values(["user_id", "timestamp"], inplace=True)
 
-    item_counts = df["item_id"].value_counts()
-    keep_items = set(item_counts[item_counts >= max(min_item_interactions, 1)].index)
-    df = df[df["item_id"].isin(keep_items)]
+    # Apply k-core style filtering so that both user and item thresholds hold
+    # simultaneously (mirrors RecBole-style preprocessing used by Mamba4Rec).
+    changed = True
+    while changed:
+        before = len(df)
+        if min_item_interactions > 1:
+            item_counts = df["item_id"].value_counts()
+            keep_items = set(item_counts[item_counts >= min_item_interactions].index)
+            df = df[df["item_id"].isin(keep_items)]
+        if min_user_interactions > 1:
+            user_counts = df["user_id"].value_counts()
+            keep_users = set(user_counts[user_counts >= min_user_interactions].index)
+            df = df[df["user_id"].isin(keep_users)]
+        changed = len(df) != before
 
     grouped = df.groupby("user_id", sort=False)
 
@@ -141,8 +157,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-item-interactions",
         type=int,
-        default=1,
-        help="Minimum interactions per item (default: 1)",
+        default=None,
+        help=(
+            "Minimum interactions per item (defaults to --min-interactions)."
+        ),
     )
     return parser.parse_args()
 
@@ -150,9 +168,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     df = _load_raw(args.raw)
-    # By default do not filter by item frequency beyond keeping items that appear at least once.
-    # This matches test expectations which generate unique items per user.
-    min_item = args.min_item_interactions if args.min_item_interactions is not None else 1
+    # To match Mamba4Rec/RecBole defaults, default the per-item minimum to the
+    # per-user minimum (5) unless the user overrides it.
+    min_item = args.min_item_interactions if args.min_item_interactions is not None else args.min_interactions
     train_df, val_df, test_df, user_ptr, train_items, num_items = _build_splits(
         df,
         min_user_interactions=args.min_interactions,

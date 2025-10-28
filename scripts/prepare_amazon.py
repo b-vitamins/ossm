@@ -78,9 +78,20 @@ def _build_splits(
     df = df.copy()
     df.sort_values(["user_id", "timestamp"], inplace=True)
 
-    item_counts = df["item_id"].value_counts()
-    keep_items = set(item_counts[item_counts >= max(min_item_interactions, 1)].index)
-    df = df[df["item_id"].isin(keep_items)]
+    # Apply k-core style filtering so that both user and item thresholds hold
+    # simultaneously (mirrors RecBole-style preprocessing used by Mamba4Rec).
+    changed = True
+    while changed:
+        before = len(df)
+        if min_item_interactions > 1:
+            item_counts = df["item_id"].value_counts()
+            keep_items = set(item_counts[item_counts >= min_item_interactions].index)
+            df = df[df["item_id"].isin(keep_items)]
+        if min_user_interactions > 1:
+            user_counts = df["user_id"].value_counts()
+            keep_users = set(user_counts[user_counts >= min_user_interactions].index)
+            df = df[df["user_id"].isin(keep_users)]
+        changed = len(df) != before
 
     grouped = df.groupby("user_id", sort=False)
 

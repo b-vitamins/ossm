@@ -235,6 +235,7 @@ and can be reproduced on CPU (for smoke tests) or GPU (for full-scale runs).
      --raw data/raw/ml-1m/ml-1m \
      --out data/seqrec/ml1m \
      --min-interactions 5
+   # This matches Mamba4Rec: no rating filter; k‑core with user≥5 and item≥5.
 
    # MovieLens-25M (~1 GB download, ~150 MB processed outputs)
    wget https://files.grouplens.org/datasets/movielens/ml-25m.zip
