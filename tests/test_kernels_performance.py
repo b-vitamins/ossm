@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Tuple, cast
+from unittest import mock
 
 import pytest
 import torch
@@ -23,6 +25,7 @@ from ossm.models._selective_scan import (
 )
 from ossm.models.mambarec import _selective_scan_discretized
 from ossm.models.dlinoss import DampedLinOSSLayer
+from ossm.models.sdlinoss import SelectiveDLinOSSLayer
 
 
 # CPU benchmark results sampled after the pointerized kernel rewrite (PyTorch
@@ -100,6 +103,17 @@ _CUDA_SPEEDUPS = {
 }
 
 _SPEEDUP_TOLERANCE = 0.15
+
+
+_SDLINOSS_VARIANTS = ("imex1", "imex2", "im", "ex")
+_SDLINOSS_LAYER_DTYPES = (
+    (torch.float32, 5e-4, 5e-4),
+    (torch.float64, 1e-6, 1e-6),
+)
+_SDLINOSS_COMPLEX_DTYPES = (
+    (torch.complex64, 5e-4, 5e-4),
+    (torch.complex128, 1e-7, 1e-7),
+)
 
 
 def _selective_cuda_available() -> bool:
@@ -323,6 +337,199 @@ def _setup_sdlinoss_case(
         return _with_limited_threads(run_extension), _with_limited_threads(run_reference), None
 
     return _inner
+
+
+def _sdlinoss_sample_inputs(
+    *,
+    length: int,
+    batch: int,
+    ssm: int,
+    device: torch.device,
+    complex_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    real_dtype = torch.float32 if complex_dtype == torch.complex64 else torch.float64
+    A = torch.randn(length, batch, ssm, device=device, dtype=real_dtype)
+    G = torch.randn(length, batch, ssm, device=device, dtype=real_dtype)
+    step = torch.rand(length, batch, ssm, device=device, dtype=real_dtype) * 0.85 + 0.05
+    real = torch.randn(length, batch, ssm, device=device, dtype=real_dtype)
+    imag = torch.randn(length, batch, ssm, device=device, dtype=real_dtype)
+    bu = torch.complex(real, imag).to(dtype=complex_dtype)
+    return A, G, step, bu
+
+
+def _sdlinoss_run_layer(
+    layer: SelectiveDLinOSSLayer, inputs: torch.Tensor
+) -> tuple[torch.Tensor, list[torch.Tensor | None]]:
+    layer.zero_grad(set_to_none=True)
+    output = layer(inputs)
+    loss = output.pow(2).sum()
+    loss.backward()
+    grads: list[torch.Tensor | None] = [
+        p.grad.detach().clone() if p.grad is not None else None
+        for p in layer.parameters()
+        if p.requires_grad
+    ]
+    return output.detach(), grads
+
+
+@pytest.mark.parametrize("variant", _SDLINOSS_VARIANTS)
+@pytest.mark.parametrize("dtype, atol, rtol", _SDLINOSS_LAYER_DTYPES)
+@pytest.mark.parametrize("device_type", ("cpu", "cuda"))
+def test_sdlinoss_layer_matches_fallback(
+    variant: str, dtype: torch.dtype, atol: float, rtol: float, device_type: str
+) -> None:
+    if device_type == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+
+    device = torch.device(device_type)
+    torch.manual_seed(0)
+    if device_type == "cuda":
+        torch.cuda.manual_seed_all(0)
+
+    layer = SelectiveDLinOSSLayer(
+        ssm_size=8,
+        hidden_dim=16,
+        variant=variant,
+        selective_injection=True,
+        per_step_dt=True,
+    ).to(device=device, dtype=dtype)
+    layer.eval()
+
+    base_inputs = torch.randn(3, 12, 16, dtype=dtype, device=device)
+
+    with mock.patch.dict(os.environ, {"OSSM_SDLINOSS_DISABLE_KERNEL": "1"}):
+        fallback_out, fallback_grads = _sdlinoss_run_layer(layer, base_inputs.clone())
+
+    if not _sdlinoss_scan_module.has_kernels(variant):
+        pytest.skip(f"Selective D-LinOSS {variant} kernels unavailable")
+
+    kernel_out, kernel_grads = _sdlinoss_run_layer(layer, base_inputs.clone())
+
+    torch.testing.assert_close(kernel_out, fallback_out, atol=atol, rtol=rtol)
+
+    for grad_kernel, grad_ref in zip(kernel_grads, fallback_grads):
+        if grad_ref is None:
+            assert grad_kernel is None
+            continue
+        assert grad_kernel is not None
+        torch.testing.assert_close(grad_kernel, grad_ref, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("variant", _SDLINOSS_VARIANTS)
+@pytest.mark.parametrize("device_type", ("cpu", "cuda"))
+@pytest.mark.parametrize("complex_dtype, atol, rtol", _SDLINOSS_COMPLEX_DTYPES)
+def test_sdlinoss_native_bindings_match_reference(
+    variant: str,
+    device_type: str,
+    complex_dtype: torch.dtype,
+    atol: float,
+    rtol: float,
+) -> None:
+    if device_type == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+
+    kernels = getattr(_sdlinoss_scan_module, "_kernels", None)
+    if kernels is None:
+        pytest.skip("Selective D-LinOSS extension unavailable")
+
+    forward_name = f"sdlinoss_{variant}_forward"
+    backward_name = f"sdlinoss_{variant}_backward"
+    if not hasattr(kernels, forward_name) or not hasattr(kernels, backward_name):
+        pytest.skip(f"Selective D-LinOSS {variant} bindings missing")
+
+    device = torch.device(device_type)
+    torch.manual_seed(1234)
+    if device_type == "cuda":
+        torch.cuda.manual_seed_all(1234)
+
+    length, batch, ssm = 4, 3, 5
+    A_base, G_base, step_base, bu_base = _sdlinoss_sample_inputs(
+        length=length,
+        batch=batch,
+        ssm=ssm,
+        device=device,
+        complex_dtype=complex_dtype,
+    )
+
+    A_ref = A_base.clone().requires_grad_(True)
+    G_ref = G_base.clone().requires_grad_(True)
+    step_ref = step_base.clone().requires_grad_(True)
+    bu_ref = bu_base.clone().requires_grad_(True)
+
+    output_ref = _sdlinoss_scan_module._fallback_sdlinoss(variant, A_ref, G_ref, step_ref, bu_ref)
+    loss_ref = output_ref.abs().square().sum()
+    grad_ref = torch.autograd.grad(loss_ref, (A_ref, G_ref, step_ref, bu_ref))
+
+    A_ker = A_base.clone().requires_grad_(True)
+    G_ker = G_base.clone().requires_grad_(True)
+    step_ker = step_base.clone().requires_grad_(True)
+    bu_ker = bu_base.clone().requires_grad_(True)
+
+    forward_fn = getattr(kernels, forward_name)
+    backward_fn = getattr(kernels, backward_name)
+
+    states_ker = forward_fn(A_ker, G_ker, step_ker, bu_ker)
+    assert states_ker.shape == (length, batch, ssm, 2)
+
+    loss_ker = (states_ker[..., 1].abs().square()).sum()
+    grad_states = torch.autograd.grad(loss_ker, states_ker, retain_graph=True)[0]
+    grad_output = grad_states[..., 1].detach().contiguous()
+    grad_kernel = torch.autograd.grad(loss_ker, (A_ker, G_ker, step_ker, bu_ker))
+
+    with torch.no_grad():
+        ref_states = _sdlinoss_scan_module._reference_sdlinoss_states(
+            variant,
+            A_base,
+            G_base,
+            step_base,
+            bu_base,
+        )
+
+    torch.testing.assert_close(states_ker, ref_states, atol=atol, rtol=rtol)
+    for grad_actual, grad_expected in zip(grad_kernel[:-1], grad_ref[:-1]):
+        torch.testing.assert_close(grad_actual.detach(), grad_expected.detach(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(grad_kernel[-1].detach(), grad_ref[-1].detach(), atol=atol, rtol=rtol)
+
+    backward_grads = backward_fn(
+        A_base.contiguous(),
+        G_base.contiguous(),
+        step_base.contiguous(),
+        bu_base.contiguous(),
+        states_ker.detach(),
+        grad_output,
+    )
+    torch.testing.assert_close(backward_grads[0], grad_kernel[0], atol=atol, rtol=rtol)
+    torch.testing.assert_close(backward_grads[1], grad_kernel[1], atol=atol, rtol=rtol)
+    torch.testing.assert_close(backward_grads[2], grad_kernel[2], atol=atol, rtol=rtol)
+    torch.testing.assert_close(backward_grads[3], grad_kernel[3], atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("variant", _SDLINOSS_VARIANTS)
+@pytest.mark.skipif(not hasattr(torch, "compile"), reason="torch.compile unavailable")
+def test_sdlinoss_layer_torch_compile(variant: str) -> None:
+    if not _sdlinoss_scan_module.has_kernels(variant):
+        pytest.skip(f"Selective D-LinOSS {variant} kernels unavailable")
+
+    torch.manual_seed(0)
+    layer = SelectiveDLinOSSLayer(
+        ssm_size=4,
+        hidden_dim=8,
+        variant=variant,
+        selective_injection=True,
+        per_step_dt=True,
+    ).eval()
+    inputs = torch.randn(2, 6, 8)
+
+    compiled_layer = torch.compile(layer, mode="reduce-overhead")
+
+    with mock.patch.dict(os.environ, {"OSSM_SDLINOSS_DISABLE_KERNEL": "1"}):
+        fallback_out, _ = _sdlinoss_run_layer(layer, inputs.clone())
+
+    eager_out, _ = _sdlinoss_run_layer(layer, inputs.clone())
+    compiled_out, _ = _sdlinoss_run_layer(compiled_layer, inputs.clone())
+
+    torch.testing.assert_close(eager_out, fallback_out, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(compiled_out, eager_out, atol=1e-6, rtol=1e-6)
 
 
 def _setup_linoss_case(length: int, batch: int, ssm: int) -> Callable[[torch.device], Tuple[Optional[Callable[[], Tensor]], Optional[Callable[[], Tensor]], Optional[str]]]:
