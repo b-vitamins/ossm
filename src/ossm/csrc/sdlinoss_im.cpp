@@ -228,6 +228,25 @@ void sdlinoss_im_backward_cpu_kernel(
   });
 }
 
+#ifdef WITH_CUDA
+void sdlinoss_im_forward_cuda(const at::Tensor& A,
+                              const at::Tensor& G,
+                              const at::Tensor& step,
+                              const at::Tensor& bu,
+                              at::Tensor& output);
+
+void sdlinoss_im_backward_cuda(const at::Tensor& A,
+                               const at::Tensor& G,
+                               const at::Tensor& step,
+                               const at::Tensor& bu,
+                               const at::Tensor& states,
+                               const at::Tensor& grad_output,
+                               at::Tensor& grad_A,
+                               at::Tensor& grad_G,
+                               at::Tensor& grad_step,
+                               at::Tensor& grad_bu);
+#endif
+
 }  // namespace
 
 void sdlinoss_im_forward_cpu(const at::Tensor& A,
