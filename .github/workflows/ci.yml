@@ -140,6 +140,9 @@ jobs:
           - name: D-LinOSS
             script: scripts/benchmark_dlinoss.py
             reference_setup: "true"
+          - name: Selective D-LinOSS
+            script: scripts/benchmark_sdlinoss.py
+            reference_setup: "true"
           - name: LinOSS
             script: scripts/benchmark_linoss.py
             reference_setup: |
