@@ -18,6 +18,12 @@ from .rnn import (
     RNNLayer,
 )
 from .s5 import S5Backbone, S5Block, S5Layer
+from .sdlinoss import (
+    SelectiveDLinOSSBackbone,
+    SelectiveDLinOSSBlock,
+    SelectiveDLinOSSLayer,
+    run_sdlinoss,
+)
 
 __all__: tuple[str, ...] = (
     "AbstractRNNCell",
@@ -54,5 +60,9 @@ __all__: tuple[str, ...] = (
     "S5Block",
     "S5Layer",
     "SequenceBackboneOutput",
+    "SelectiveDLinOSSBackbone",
+    "SelectiveDLinOSSBlock",
+    "SelectiveDLinOSSLayer",
     "TiedSoftmaxHead",
+    "run_sdlinoss",
 )

@@ -44,7 +44,11 @@ from .models import (
     S5Block,
     S5Layer,
     SequenceBackboneOutput,
+    SelectiveDLinOSSBackbone,
+    SelectiveDLinOSSBlock,
+    SelectiveDLinOSSLayer,
     TiedSoftmaxHead,
+    run_sdlinoss,
 )
 __all__: tuple[str, ...] = (
     "data",
@@ -83,5 +87,9 @@ __all__: tuple[str, ...] = (
     "S5Block",
     "S5Layer",
     "SequenceBackboneOutput",
+    "SelectiveDLinOSSBackbone",
+    "SelectiveDLinOSSBlock",
+    "SelectiveDLinOSSLayer",
     "TiedSoftmaxHead",
+    "run_sdlinoss",
 )
