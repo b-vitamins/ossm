@@ -8,6 +8,7 @@ from .mambarec import Mamba4Rec, MambaLayer
 from .linoss import LinOSSBackbone, LinOSSBlock, LinOSSLayer
 from .lru import LRUBackbone, LRUBlock, LRULayer
 from .ncde import NCDEBackbone, NCDELayer, NCDEVectorField, NRDELayer
+from .sdlinossrec import Sdlinoss4Rec
 from .rnn import (
     AbstractRNNCell,
     GRURNNCell,
@@ -34,6 +35,7 @@ __all__: tuple[str, ...] = (
     "DampedLinOSSBlock",
     "DampedLinOSSLayer",
     "Dlinoss4Rec",
+    "Sdlinoss4Rec",
     "GRURNNCell",
     "Head",
     "ItemEmbeddingEncoder",
