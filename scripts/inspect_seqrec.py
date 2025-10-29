@@ -20,7 +20,6 @@ import pandas as pd
 
 
 def _stats(root: Path) -> Dict[str, float | int]:
-    train = pd.read_parquet(root / "train.parquet")
     val = pd.read_parquet(root / "val.parquet")
     test = pd.read_parquet(root / "test.parquet")
     ptr = np.load(root / "user_ptr.npy")

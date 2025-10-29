@@ -38,7 +38,7 @@ import json
 import tarfile
 import zipfile
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
