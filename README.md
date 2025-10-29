@@ -247,12 +247,14 @@ and can be reproduced on CPU (for smoke tests) or GPU (for full-scale runs).
      --min-interactions 5 \
      --min-item-interactions 5
 
-   # Amazon category dumps (Beauty & Video Games)
+   # Amazon category dumps (Beauty, Video Games, and Sports & Outdoors)
    mkdir -p data/raw/amazon
    wget http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Beauty_5.json.gz \
      -O data/raw/amazon/reviews_Beauty_5.json.gz
    wget http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Video_Games_5.json.gz \
      -O data/raw/amazon/reviews_Video_Games_5.json.gz
+   wget http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Sports_and_Outdoors_5.json.gz \
+     -O data/raw/amazon/reviews_Sports_and_Outdoors_5.json.gz
    python scripts/prepare_amazon.py \
      --subset beauty \
      --raw data/raw/amazon \
@@ -262,6 +264,28 @@ and can be reproduced on CPU (for smoke tests) or GPU (for full-scale runs).
      --subset videogames \
      --raw data/raw/amazon \
      --out data/seqrec/amazonvideogames \
+     --min-interactions 5
+   python scripts/prepare_amazon.py \
+     --subset sports \
+     --raw data/raw/amazon \
+     --out data/seqrec/amazonsports \
+     --min-interactions 5
+
+   # Yelp Open Dataset (reviews only)
+   # 1) Request/download the dataset from:
+   #    https://business.yelp.com/data/resources/open-dataset/
+   # 2) Place the archive (e.g., Yelp-JSON.zip) under data/raw/yelp/ or extract
+   #    the inner TAR so you have yelp_academic_dataset_review.json available.
+   #    The prepare script accepts either the JSON path or the ZIP directly.
+   # Using the extracted JSONL file:
+   python scripts/prepare_yelp.py \
+     --json data/raw/yelp/yelp_academic_dataset_review.json \
+     --out data/seqrec/yelp \
+     --min-interactions 5
+   # Or, using the downloaded ZIP directly:
+   python scripts/prepare_yelp.py \
+     --zip Yelp-JSON.zip \
+     --out data/seqrec/yelp \
      --min-interactions 5
    ```
 
@@ -292,6 +316,10 @@ and can be reproduced on CPU (for smoke tests) or GPU (for full-scale runs).
    Swap `--dataset-name` (and the corresponding validation/test defaults) to
    `ml25m` to run on the MovieLens-25M split after preprocessing it with the
    helper script above.
+
+   To run on Yelp after preparing it as above, use `--dataset-name yelp` and
+   point `--dataset-root` (or `OSSM_DATA_ROOT`) at the directory that contains
+   `seqrec/yelp`.
 
 3. **Aggregate metrics into publication-style tables**
 
