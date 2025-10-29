@@ -53,7 +53,7 @@ def _kernel_disabled() -> None:
 
 def _time_function(fn: Callable[[], torch.Tensor], *, repeats: int, synchronize: bool) -> Tuple[float, torch.Tensor]:
     for _ in range(5):
-        result = fn()
+        fn()
         if synchronize:
             torch.cuda.synchronize()
     start = time.perf_counter()
