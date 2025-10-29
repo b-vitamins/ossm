@@ -130,6 +130,42 @@ else:
             _CUSTOM_OP_LIBRARY.define(
                 "sdlinoss_ex_backward(Tensor A, Tensor G, Tensor step, Tensor bu, Tensor states, Tensor grad_output) -> (Tensor, Tensor, Tensor, Tensor)"
             )
+
+            _registration_failed = {"flag": False}
+
+            def _register_kernel_impl(name: str, fn) -> None:
+                try:
+                    _CUSTOM_OP_LIBRARY.impl(name, fn, "CompositeExplicitAutograd")
+                except RuntimeError:
+                    _registration_failed["flag"] = True
+
+            if _CUSTOM_OP_LIBRARY is not None:
+                _register_kernel_impl("sdlinoss_imex1_forward", _kernels.sdlinoss_imex1_forward)
+
+                def _sdlinoss_imex1_backward_impl(A, G, step, bu, states, grad_output):
+                    return _kernels.sdlinoss_imex1_backward(A, G, step, bu, states, grad_output)
+
+                _register_kernel_impl("sdlinoss_imex1_backward", _sdlinoss_imex1_backward_impl)
+                _register_kernel_impl("sdlinoss_imex2_forward", _kernels.sdlinoss_imex2_forward)
+
+                def _sdlinoss_imex2_backward_impl(A, G, step, bu, states, grad_output):
+                    return _kernels.sdlinoss_imex2_backward(A, G, step, bu, states, grad_output)
+
+                _register_kernel_impl("sdlinoss_imex2_backward", _sdlinoss_imex2_backward_impl)
+                _register_kernel_impl("sdlinoss_im_forward", _kernels.sdlinoss_im_forward)
+
+                def _sdlinoss_im_backward_impl(A, G, step, bu, states, grad_output):
+                    return _kernels.sdlinoss_im_backward(A, G, step, bu, states, grad_output)
+
+                _register_kernel_impl("sdlinoss_im_backward", _sdlinoss_im_backward_impl)
+                _register_kernel_impl("sdlinoss_ex_forward", _kernels.sdlinoss_ex_forward)
+
+                def _sdlinoss_ex_backward_impl(A, G, step, bu, states, grad_output):
+                    return _kernels.sdlinoss_ex_backward(A, G, step, bu, states, grad_output)
+
+                _register_kernel_impl("sdlinoss_ex_backward", _sdlinoss_ex_backward_impl)
+                if _registration_failed["flag"]:
+                    _CUSTOM_OP_LIBRARY = None
         except RuntimeError:
             _CUSTOM_OP_LIBRARY = None
     except ImportError:  # pragma: no cover - very old torch versions
