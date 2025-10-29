@@ -119,48 +119,48 @@ def _expand_param(param: Tensor, length: int, batch: int, ssm: int, *, device, d
     )
 
 
-def _reference_sdlinoss_states(variant: str, A: Tensor, G: Tensor, step: Tensor, bu: Tensor) -> Tensor:
+def _reference_sdlinoss_states(variant: str, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu: Tensor) -> Tensor:
     variant = variant.lower()
     if variant not in _SUPPORTED_VARIANTS:
         raise ValueError(f"Unknown selective D-LinOSS variant '{variant}'.")
 
-    A = A.contiguous()
-    G = G.contiguous()
-    step = torch.clamp(step.contiguous(), min=1e-6, max=1.0)
-    bu = bu.contiguous()
+    if bu.dim() != 3:
+        raise ValueError("Selective D-LinOSS expects (length, batch, state) inputs.")
 
     length, batch, ssm = bu.shape
-    states = bu.new_zeros((length, batch, ssm, 2))
+    device = bu.device
+    complex_dtype = bu.dtype
+    real_dtype = _infer_real_dtype_from_complex(bu)
 
-    z = bu.new_zeros((batch, ssm))
-    x = bu.new_zeros((batch, ssm))
+    A = _expand_param(a_diag, length, batch, ssm, device=device, dtype=real_dtype).contiguous()
+    G = _expand_param(g_diag, length, batch, ssm, device=device, dtype=real_dtype).contiguous()
+    dt = _expand_param(step, length, batch, ssm, device=device, dtype=real_dtype)
+    dt = torch.clamp(dt, min=1e-6, max=1.0).contiguous()
+    bu = bu.contiguous()
+
+    z = torch.zeros(batch, ssm, dtype=complex_dtype, device=device)
+    x = torch.zeros(batch, ssm, dtype=complex_dtype, device=device)
+    states = torch.empty(length, batch, ssm, 2, dtype=complex_dtype, device=device)
 
     for t in range(length):
+        dt_t = dt[t]
         a_t = A[t]
         g_t = G[t]
-        dt_t = step[t]
         bu_t = bu[t]
 
         if variant == "imex1":
             S = torch.clamp(1.0 + dt_t * g_t, min=1e-6)
-            tmp = z + dt_t * (-a_t * x + bu_t)
-            z = tmp / S
-            x = x + dt_t * z
+            z = (z + dt_t * (-a_t * x + bu_t)) / S
         elif variant == "imex2":
             S = torch.clamp(1.0 + (dt_t * dt_t) * a_t, min=1e-6)
-            tmp = z + dt_t * (-a_t * x - g_t * z + bu_t)
-            z = tmp / S
-            x = x + dt_t * z
+            z = (z + dt_t * (-a_t * x - g_t * z + bu_t)) / S
         elif variant == "im":
             S = torch.clamp(1.0 + dt_t * g_t + (dt_t * dt_t) * a_t, min=1e-6)
-            tmp = z + dt_t * (-a_t * x + bu_t)
-            z = tmp / S
-            x = x + dt_t * z
+            z = (z + dt_t * (-a_t * x + bu_t)) / S
         else:  # ex
-            tmp = z + dt_t * (-a_t * x - g_t * z + bu_t)
-            z = tmp
-            x = x + dt_t * z
+            z = z + dt_t * (-a_t * x - g_t * z + bu_t)
 
+        x = x + dt_t * z
         states[t, :, :, 0] = z
         states[t, :, :, 1] = x
 
