@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Tuple, cast
 
@@ -10,6 +11,7 @@ from torch import Tensor
 from torch.utils import benchmark
 
 import ossm.models._dlinoss_scan as _dlinoss_scan_module
+import ossm.models._sdlinoss_scan as _sdlinoss_scan_module
 from ossm.models._dlinoss_scan import has_kernels as _dlinoss_has_kernels
 from ossm.models._linoss_scan import try_run_scan as _linoss_try_run_scan
 from ossm.models._lru_scan import try_run_lru_scan
@@ -63,6 +65,20 @@ _DLINOSS_CUDA_SPEEDUPS = {
     "imex2": 3.5,
     "im": 3.5,
     "ex": 3.5,
+}
+
+_SDLINOSS_CPU_SPEEDUPS = {
+    "imex1": 1.20,
+    "imex2": 1.20,
+    "im": 1.20,
+    "ex": 1.10,
+}
+
+_SDLINOSS_CUDA_SPEEDUPS = {
+    "imex1": 4.6,
+    "imex2": 4.4,
+    "im": 4.3,
+    "ex": 4.1,
 }
 
 _CUDA_SPEEDUPS = {
@@ -210,6 +226,91 @@ def _setup_selective_case(
             return baseline * F.silu(gate)
 
         return run_extension, run_reference, None
+
+    return _inner
+
+
+def _build_sdlinoss_parameters(
+    length: int,
+    batch: int,
+    ssm: int,
+    *,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    r = torch.rand(length, batch, ssm, dtype=torch.float32, device=device) * 0.79 + 0.20
+    theta = (torch.rand(length, batch, ssm, dtype=torch.float32, device=device) * 2.0 - 1.0) * math.pi
+    step = torch.sigmoid(torch.randn(length, batch, ssm, dtype=torch.float32, device=device))
+    r2 = torch.clamp(r * r, min=1e-8)
+    dtc = torch.clamp(step, min=1e-6)
+    a_diag = torch.clamp((r2 - 2.0 * r * torch.cos(theta) + 1.0) / (dtc * dtc * r2), min=0.0)
+    g_diag = torch.clamp((1.0 - r2) / (dtc * r2), min=0.0)
+    bu_real = torch.randn(length, batch, ssm, dtype=torch.float32, device=device)
+    bu_imag = torch.randn(length, batch, ssm, dtype=torch.float32, device=device)
+    bu = torch.complex(bu_real, bu_imag)
+    return a_diag.contiguous(), g_diag.contiguous(), step.contiguous(), bu.contiguous()
+
+
+def _setup_sdlinoss_case(
+    length: int,
+    batch: int,
+    ssm: int,
+    variant: str,
+) -> Callable[[torch.device], Tuple[Optional[Callable[[], torch.Tensor]], Optional[Callable[[], torch.Tensor]], Optional[str]]]:
+    def _inner(
+        device: torch.device,
+    ) -> Tuple[Optional[Callable[[], torch.Tensor]], Optional[Callable[[], torch.Tensor]], Optional[str]]:
+        if device.type == "cuda" and not torch.cuda.is_available():
+            return None, None, "CUDA unavailable"
+
+        torch.manual_seed(0)
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(0)
+
+        if not _sdlinoss_scan_module.has_kernels(variant):
+            return None, None, f"Selective D-LinOSS {variant} kernel is unavailable"
+
+        a_diag, g_diag, step, bu = _build_sdlinoss_parameters(
+            length, batch, ssm, device=device
+        )
+
+        fallback_fn = getattr(_sdlinoss_scan_module, "_fallback_sdlinoss", None)
+        kernels = cast(Any, getattr(_sdlinoss_scan_module, "_kernels", None))
+        forward_name = f"sdlinoss_{variant}_forward"
+        if fallback_fn is None or kernels is None or not hasattr(kernels, forward_name):
+            return None, None, f"Selective D-LinOSS {variant} kernel is unavailable"
+
+        try:
+            with torch.no_grad():
+                getattr(kernels, forward_name)(a_diag, g_diag, step, bu)
+        except RuntimeError:
+            return None, None, "Selective D-LinOSS kernel execution failed"
+
+        def _with_limited_threads(fn: Callable[[], torch.Tensor]) -> Callable[[], torch.Tensor]:
+            def _wrapped() -> torch.Tensor:
+                prev_threads = torch.get_num_threads()
+                try:
+                    torch.set_num_threads(1)
+                    return fn()
+                finally:
+                    torch.set_num_threads(prev_threads)
+
+            return _wrapped
+
+        def run_extension() -> torch.Tensor:
+            with torch.no_grad():
+                return cast(
+                    torch.Tensor,
+                    _sdlinoss_scan_module.run_sdlinoss(variant, a_diag, g_diag, step, bu),
+                )
+
+        def run_reference() -> torch.Tensor:
+            with torch.no_grad():
+                return cast(
+                    torch.Tensor,
+                    fallback_fn(variant, a_diag, g_diag, step, bu),
+                )
+
+        return _with_limited_threads(run_extension), _with_limited_threads(run_reference), None
 
     return _inner
 
@@ -463,6 +564,7 @@ def _setup_dlinoss_case(
 
 _DLINOSS_VARIANTS = ("imex1", "imex2", "im", "ex")
 _DLINOSS_KERNEL_VARIANTS = ("imex1", "imex2", "im", "ex")
+_SDLINOSS_VARIANTS = ("imex1", "imex2", "im", "ex")
 
 
 _CPU_CASES = [
@@ -481,6 +583,23 @@ _CPU_CASES = [
     )
     for variant in _DLINOSS_VARIANTS
 ]
+_CPU_CASES.extend(
+    [
+        BenchmarkCase(
+            name=f"sdlinoss-{variant}",
+            device_type="cpu",
+            setup=_setup_sdlinoss_case(
+                length=4096,
+                batch=8,
+                ssm=256,
+                variant=variant,
+            ),
+            min_runtime=0.35,
+            threshold=_SDLINOSS_CPU_SPEEDUPS[variant],
+        )
+        for variant in _SDLINOSS_VARIANTS
+    ]
+)
 _CPU_CASES.extend(
     [
         BenchmarkCase(
@@ -551,6 +670,24 @@ _CUDA_CASES = [
     )
     for variant in _DLINOSS_VARIANTS
 ]
+_CUDA_CASES.extend(
+    [
+        BenchmarkCase(
+            name=f"sdlinoss-{variant}",
+            device_type="cuda",
+            setup=_setup_sdlinoss_case(
+                length=4096,
+                batch=16,
+                ssm=256,
+                variant=variant,
+            ),
+            min_runtime=0.6,
+            threshold=_SDLINOSS_CUDA_SPEEDUPS[variant],
+            synchronize=True,
+        )
+        for variant in _SDLINOSS_VARIANTS
+    ]
+)
 _CUDA_CASES.extend(
     [
         BenchmarkCase(

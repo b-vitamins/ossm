@@ -1,0 +1,252 @@
+#include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/Exceptions.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <torch/extension.h>
+
+namespace ossm {
+namespace {
+
+constexpr double kDtMin = 1e-6;
+constexpr double kDtMax = 1.0;
+
+template <typename value_t>
+__device__ inline value_t clamp_step(value_t raw) {
+  const value_t lower = static_cast<value_t>(kDtMin);
+  const value_t upper = static_cast<value_t>(kDtMax);
+  return raw < lower ? lower : (raw > upper ? upper : raw);
+}
+
+template <typename scalar_t>
+__global__ void sdlinoss_ex_forward_kernel(
+    const typename scalar_t::value_type* __restrict__ A,
+    const typename scalar_t::value_type* __restrict__ G,
+    const typename scalar_t::value_type* __restrict__ step,
+    const scalar_t* __restrict__ bu_ptr,
+    scalar_t* __restrict__ out_ptr,
+    int64_t length,
+    int64_t batch,
+    int64_t ssm) {
+  using value_t = typename scalar_t::value_type;
+
+  const int64_t series = batch * ssm;
+  const int64_t step_stride = series * 2;
+
+  for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < series; idx += blockDim.x * gridDim.x) {
+    value_t z_real = value_t(0);
+    value_t z_imag = value_t(0);
+    value_t x_real = value_t(0);
+    value_t x_imag = value_t(0);
+
+    for (int64_t t = 0; t < length; ++t) {
+      const int64_t offset = t * series + idx;
+      const value_t a_t = A[offset];
+      const value_t g_t = G[offset];
+      const value_t step_raw = step[offset];
+      const value_t dt = clamp_step(step_raw);
+
+      const scalar_t bu_val = bu_ptr[offset];
+      const value_t bu_real = bu_val.real();
+      const value_t bu_imag = bu_val.imag();
+
+      const value_t comb_real = -a_t * x_real - g_t * z_real + bu_real;
+      const value_t comb_imag = -a_t * x_imag - g_t * z_imag + bu_imag;
+
+      const value_t new_z_real = z_real + dt * comb_real;
+      const value_t new_z_imag = z_imag + dt * comb_imag;
+      const value_t new_x_real = x_real + dt * new_z_real;
+      const value_t new_x_imag = x_imag + dt * new_z_imag;
+
+      const int64_t out_offset = t * step_stride + idx * 2;
+      out_ptr[out_offset] = scalar_t(new_z_real, new_z_imag);
+      out_ptr[out_offset + 1] = scalar_t(new_x_real, new_x_imag);
+
+      z_real = new_z_real;
+      z_imag = new_z_imag;
+      x_real = new_x_real;
+      x_imag = new_x_imag;
+    }
+  }
+}
+
+template <typename scalar_t>
+__global__ void sdlinoss_ex_backward_kernel(
+    const typename scalar_t::value_type* __restrict__ A,
+    const typename scalar_t::value_type* __restrict__ G,
+    const typename scalar_t::value_type* __restrict__ step,
+    const scalar_t* __restrict__ bu_ptr,
+    const scalar_t* __restrict__ states_ptr,
+    const scalar_t* __restrict__ grad_out_ptr,
+    scalar_t* __restrict__ grad_bu_ptr,
+    typename scalar_t::value_type* __restrict__ grad_A_ptr,
+    typename scalar_t::value_type* __restrict__ grad_G_ptr,
+    typename scalar_t::value_type* __restrict__ grad_step_ptr,
+    int64_t length,
+    int64_t batch,
+    int64_t ssm) {
+  using value_t = typename scalar_t::value_type;
+
+  const int64_t series = batch * ssm;
+  const int64_t step_stride = series * 2;
+
+  for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < series; idx += blockDim.x * gridDim.x) {
+    value_t grad_z_next_real = value_t(0);
+    value_t grad_z_next_imag = value_t(0);
+    value_t grad_x_next_real = value_t(0);
+    value_t grad_x_next_imag = value_t(0);
+
+    for (int64_t t = length - 1; t >= 0; --t) {
+      const int64_t offset = t * series + idx;
+      const int64_t out_offset = t * step_stride + idx * 2;
+
+      const scalar_t state_z = states_ptr[out_offset];
+      const scalar_t state_x = states_ptr[out_offset + 1];
+      const value_t z_new_real = state_z.real();
+      const value_t z_new_imag = state_z.imag();
+      const value_t x_new_real = state_x.real();
+      const value_t x_new_imag = state_x.imag();
+
+      value_t z_prev_real = value_t(0);
+      value_t z_prev_imag = value_t(0);
+      value_t x_prev_real = value_t(0);
+      value_t x_prev_imag = value_t(0);
+      if (t > 0) {
+        const int64_t prev_offset = out_offset - step_stride;
+        const scalar_t prev_z = states_ptr[prev_offset];
+        const scalar_t prev_x = states_ptr[prev_offset + 1];
+        z_prev_real = prev_z.real();
+        z_prev_imag = prev_z.imag();
+        x_prev_real = prev_x.real();
+        x_prev_imag = prev_x.imag();
+      }
+
+      const scalar_t grad_out = grad_out_ptr[offset];
+      value_t grad_x_new_real = grad_out.real() + grad_x_next_real;
+      value_t grad_x_new_imag = grad_out.imag() + grad_x_next_imag;
+      value_t grad_z_new_real = grad_z_next_real;
+      value_t grad_z_new_imag = grad_z_next_imag;
+
+      const value_t a_t = A[offset];
+      const value_t g_t = G[offset];
+      const value_t step_raw = step[offset];
+      const value_t dt = clamp_step(step_raw);
+      const value_t step_mask = (step_raw > value_t(kDtMin) && step_raw < value_t(kDtMax)) ? value_t(1) : value_t(0);
+
+      const scalar_t bu_val = bu_ptr[offset];
+      const value_t bu_real = bu_val.real();
+      const value_t bu_imag = bu_val.imag();
+
+      value_t grad_step_local = value_t(0);
+      value_t grad_A_local = value_t(0);
+      value_t grad_G_local = value_t(0);
+
+      grad_step_local += grad_x_new_real * z_new_real + grad_x_new_imag * z_new_imag;
+      grad_z_new_real += dt * grad_x_new_real;
+      grad_z_new_imag += dt * grad_x_new_imag;
+      value_t grad_x_prev_real = grad_x_new_real;
+      value_t grad_x_prev_imag = grad_x_new_imag;
+
+      const value_t comb_real = -a_t * x_prev_real - g_t * z_prev_real + bu_real;
+      const value_t comb_imag = -a_t * x_prev_imag - g_t * z_prev_imag + bu_imag;
+
+      const value_t grad_temp_real = grad_z_new_real;
+      const value_t grad_temp_imag = grad_z_new_imag;
+
+      grad_step_local += grad_temp_real * comb_real + grad_temp_imag * comb_imag;
+      grad_A_local += grad_temp_real * (-dt * x_prev_real) + grad_temp_imag * (-dt * x_prev_imag);
+      grad_G_local += grad_temp_real * (-dt * z_prev_real) + grad_temp_imag * (-dt * z_prev_imag);
+
+      grad_x_prev_real += grad_temp_real * (-dt * a_t);
+      grad_x_prev_imag += grad_temp_imag * (-dt * a_t);
+
+      const value_t grad_z_prev_factor = value_t(1) - dt * g_t;
+      const value_t grad_z_prev_real = grad_temp_real * grad_z_prev_factor;
+      const value_t grad_z_prev_imag = grad_temp_imag * grad_z_prev_factor;
+
+      const value_t grad_bu_real = grad_temp_real * dt;
+      const value_t grad_bu_imag = grad_temp_imag * dt;
+
+      grad_A_ptr[offset] = grad_A_local;
+      grad_G_ptr[offset] = grad_G_local;
+      grad_step_ptr[offset] = grad_step_local * step_mask;
+      grad_bu_ptr[offset] = scalar_t(grad_bu_real, grad_bu_imag);
+
+      grad_x_next_real = grad_x_prev_real;
+      grad_x_next_imag = grad_x_prev_imag;
+      grad_z_next_real = grad_z_prev_real;
+      grad_z_next_imag = grad_z_prev_imag;
+    }
+  }
+}
+
+}  // namespace
+
+void sdlinoss_ex_forward_cuda(const at::Tensor& A,
+                              const at::Tensor& G,
+                              const at::Tensor& step,
+                              const at::Tensor& bu,
+                              at::Tensor& output) {
+  c10::cuda::OptionalCUDAGuard device_guard{bu.device()};
+
+  const auto batch = bu.size(1);
+  const auto ssm = bu.size(2);
+  const auto series = batch * ssm;
+
+  constexpr int64_t threads = 256;
+  const int64_t blocks = std::max<int64_t>(
+      1, std::min<int64_t>((series + threads - 1) / threads, at::cuda::getCurrentDeviceProperties()->maxGridSize[0]));
+
+  AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "sdlinoss_ex_forward_cuda", [&] {
+    sdlinoss_ex_forward_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+        A.data_ptr<typename scalar_t::value_type>(),
+        G.data_ptr<typename scalar_t::value_type>(),
+        step.data_ptr<typename scalar_t::value_type>(),
+        bu.data_ptr<scalar_t>(),
+        output.data_ptr<scalar_t>(),
+        bu.size(0),
+        batch,
+        ssm);
+  });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void sdlinoss_ex_backward_cuda(const at::Tensor& A,
+                               const at::Tensor& G,
+                               const at::Tensor& step,
+                               const at::Tensor& bu,
+                               const at::Tensor& states,
+                               const at::Tensor& grad_output,
+                               at::Tensor& grad_A,
+                               at::Tensor& grad_G,
+                               at::Tensor& grad_step,
+                               at::Tensor& grad_bu) {
+  c10::cuda::OptionalCUDAGuard device_guard{bu.device()};
+
+  const auto batch = bu.size(1);
+  const auto ssm = bu.size(2);
+  const auto series = batch * ssm;
+
+  constexpr int64_t threads = 256;
+  const int64_t blocks = std::max<int64_t>(
+      1, std::min<int64_t>((series + threads - 1) / threads, at::cuda::getCurrentDeviceProperties()->maxGridSize[0]));
+
+  AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "sdlinoss_ex_backward_cuda", [&] {
+    sdlinoss_ex_backward_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+        A.data_ptr<typename scalar_t::value_type>(),
+        G.data_ptr<typename scalar_t::value_type>(),
+        step.data_ptr<typename scalar_t::value_type>(),
+        bu.data_ptr<scalar_t>(),
+        states.data_ptr<scalar_t>(),
+        grad_output.data_ptr<scalar_t>(),
+        grad_bu.data_ptr<scalar_t>(),
+        grad_A.data_ptr<typename scalar_t::value_type>(),
+        grad_G.data_ptr<typename scalar_t::value_type>(),
+        grad_step.data_ptr<typename scalar_t::value_type>(),
+        bu.size(0),
+        batch,
+        ssm);
+  });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+}  // namespace ossm
+
