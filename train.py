@@ -54,6 +54,7 @@ AVAILABLE_MODELS = (
     "ncde",
     "rnn",
     "dlinossrec",
+    "sdlinossrec",
     "mambarec",
 )
 AVAILABLE_HEADS = ("classification", "regression", "tiedsoftmax")
@@ -523,7 +524,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
         "--discretization",
         choices=DLINOSS_VARIANTS,
         default=None,
-        help="Select the D-LinOSS discretization when using dlinoss or dlinossrec.",
+        help=(
+            "Select the D-LinOSS discretization when using dlinoss, dlinossrec, "
+            "or sdlinossrec."
+        ),
     )
 
     data_group = parser.add_argument_group("Dataset")
@@ -804,7 +808,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
 
 def _compose_config(args: argparse.Namespace, extra_overrides: Sequence[str]) -> DictConfig:
     task = args.task if args.task is not None else args.head
-    if task != "seqrec" and args.model in {"dlinossrec", "mambarec"}:
+    if task != "seqrec" and args.model in {"dlinossrec", "sdlinossrec", "mambarec"}:
         raise ValueError(f"Model '{args.model}' requires --task seqrec.")
     if task != "seqrec" and args.head == "tiedsoftmax":
         raise ValueError("Head 'tiedsoftmax' requires --task seqrec.")
@@ -920,10 +924,13 @@ def _compose_config(args: argparse.Namespace, extra_overrides: Sequence[str]) ->
     if args.discretization is not None:
         if args.model == "dlinoss":
             overrides.append(f"model.params.variant={args.discretization}")
-        elif args.model == "dlinossrec":
+        elif args.model in {"dlinossrec", "sdlinossrec"}:
             overrides.append(f"model.variant={args.discretization}")
         else:
-            raise ValueError("--discretization is only valid with --model dlinoss or dlinossrec")
+            raise ValueError(
+                "--discretization is only valid with --model dlinoss, "
+                "dlinossrec, or sdlinossrec"
+            )
 
     if args.window_steps is not None:
         overrides.extend(

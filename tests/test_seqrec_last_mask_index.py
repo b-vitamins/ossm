@@ -5,6 +5,7 @@ import torch
 
 from ossm.models.dlinossrec import Dlinoss4Rec, _last_mask_index
 from ossm.models.mambarec import Mamba4Rec
+from ossm.models.sdlinossrec import Sdlinoss4Rec
 
 
 def _build_dlinoss() -> Dlinoss4Rec:
@@ -30,6 +31,20 @@ def _build_mamba() -> Mamba4Rec:
         use_pffn=True,
         d_conv=2,
         expand=2,
+    )
+
+
+def _build_sdlinoss() -> Sdlinoss4Rec:
+    return Sdlinoss4Rec(
+        num_items=32,
+        d_model=8,
+        ssm_size=8,
+        blocks=1,
+        dropout=0.0,
+        max_len=4,
+        use_pffn=True,
+        selective_injection=True,
+        per_step_dt=True,
     )
 
 
@@ -64,8 +79,8 @@ def test_last_mask_index(mask: torch.Tensor, expected: list[int]) -> None:
 
 @pytest.mark.parametrize(
     "model_builder",
-    [_build_dlinoss, _build_mamba],
-    ids=["dlinoss", "mamba"],
+    [_build_dlinoss, _build_sdlinoss, _build_mamba],
+    ids=["dlinoss", "sdlinoss", "mamba"],
 )
 def test_forward_features_gathers_last_valid_step(model_builder) -> None:
     model = model_builder()
