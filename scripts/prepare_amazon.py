@@ -10,7 +10,11 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
-VALID_SUBSETS = {"beauty": "Beauty", "videogames": "Video_Games"}
+VALID_SUBSETS = {
+    "beauty": "Beauty",
+    "videogames": "Video_Games",
+    "sports": "Sports_and_Outdoors",
+}
 
 
 def _find_file(raw_dir: Path, subset_key: str) -> Path:
