@@ -22,6 +22,7 @@ from ..data.datasets import SeqRecEvalDataset, SeqRecTrainDataset, collate_left_
 from ..metrics import TopKMetricAccumulator, mask_history_inplace
 from ..models.dlinossrec import Dlinoss4Rec
 from ..models.mambarec import Mamba4Rec
+from ..models.sdlinossrec import Sdlinoss4Rec
 from .progress import ProgressReporter, format_duration
 
 # Resolve AMP utilities in a version-tolerant manner without triggering type-checker errors.
@@ -247,7 +248,9 @@ def _warn_if_placeholder_dataset(summary: Dict[str, Any], dataset_name: str) -> 
     )
 
 
-def build_model(cfg: DictConfig, num_items: int, max_len: int) -> Dlinoss4Rec | Mamba4Rec:
+def build_model(
+    cfg: DictConfig, num_items: int, max_len: int
+) -> Dlinoss4Rec | Sdlinoss4Rec | Mamba4Rec:
     model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
     if not isinstance(model_cfg, dict):  # pragma: no cover - config guard
         raise TypeError("Model configuration must resolve to a mapping")
@@ -284,6 +287,29 @@ def build_model(cfg: DictConfig, num_items: int, max_len: int) -> Dlinoss4Rec | 
             head_bias=head_bias,
             head_temperature=head_temperature,
             **dlinoss_cfg,
+        )
+    if model_name == "sdlinossrec":
+        sdlinoss_cfg = dict(cfg_dict)
+        d_model = int(sdlinoss_cfg.pop("d_model"))
+        ssm_size = int(sdlinoss_cfg.pop("ssm_size"))
+        blocks = int(sdlinoss_cfg.pop("blocks"))
+        dropout = float(sdlinoss_cfg.pop("dropout"))
+        use_pffn = bool(sdlinoss_cfg.pop("use_pffn", True))
+        use_pos_emb = bool(sdlinoss_cfg.pop("use_pos_emb", False))
+        use_layernorm = bool(sdlinoss_cfg.pop("use_layernorm", True))
+        return Sdlinoss4Rec(
+            num_items=num_items,
+            d_model=d_model,
+            ssm_size=ssm_size,
+            blocks=blocks,
+            dropout=dropout,
+            max_len=max_len,
+            use_pffn=use_pffn,
+            use_pos_emb=use_pos_emb,
+            use_layernorm=use_layernorm,
+            head_bias=head_bias,
+            head_temperature=head_temperature,
+            **sdlinoss_cfg,
         )
     if model_name == "mambarec":
         mamba_cfg = dict(cfg_dict)
@@ -334,7 +360,7 @@ def build_model(cfg: DictConfig, num_items: int, max_len: int) -> Dlinoss4Rec | 
 
 @torch.no_grad()
 def evaluate_fullsort(
-    model: Dlinoss4Rec | Mamba4Rec,
+    model: Dlinoss4Rec | Sdlinoss4Rec | Mamba4Rec,
     loader: DataLoader,
     seen_items: Dict[int, torch.Tensor],
     device: torch.device,
