@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Optional, Protocol, Tuple, cast
+from typing import Optional, Protocol, Tuple, cast
 
 import torch
 from torch import Tensor, autocast
@@ -15,11 +15,6 @@ __all__ = [
 ]
 
 _SUPPORTED_VARIANTS: Tuple[str, ...] = ("imex1", "imex2", "im", "ex")
-
-if TYPE_CHECKING:
-    from torch.library import Library
-
-_CUSTOM_OP_LIBRARY: Optional["Library"] = None
 
 
 def _maybe_dynamo_module():
@@ -100,77 +95,6 @@ except ImportError as exc:  # pragma: no cover - build-time failure surface
 else:
     _kernels = cast("_SdlinossKernels", _kernels)
     _EXTENSION_ERROR = None
-
-    try:  # pragma: no cover - optional torch.library availability
-        from torch.library import Library
-
-        try:
-            _CUSTOM_OP_LIBRARY = Library("ossm", "DEF")
-            _CUSTOM_OP_LIBRARY.define(
-                "sdlinoss_imex1_forward(Tensor A, Tensor G, Tensor step, Tensor bu) -> Tensor"
-            )
-            _CUSTOM_OP_LIBRARY.define(
-                "sdlinoss_imex1_backward(Tensor A, Tensor G, Tensor step, Tensor bu, Tensor states, Tensor grad_output) -> (Tensor, Tensor, Tensor, Tensor)"
-            )
-            _CUSTOM_OP_LIBRARY.define(
-                "sdlinoss_imex2_forward(Tensor A, Tensor G, Tensor step, Tensor bu) -> Tensor"
-            )
-            _CUSTOM_OP_LIBRARY.define(
-                "sdlinoss_imex2_backward(Tensor A, Tensor G, Tensor step, Tensor bu, Tensor states, Tensor grad_output) -> (Tensor, Tensor, Tensor, Tensor)"
-            )
-            _CUSTOM_OP_LIBRARY.define(
-                "sdlinoss_im_forward(Tensor A, Tensor G, Tensor step, Tensor bu) -> Tensor"
-            )
-            _CUSTOM_OP_LIBRARY.define(
-                "sdlinoss_im_backward(Tensor A, Tensor G, Tensor step, Tensor bu, Tensor states, Tensor grad_output) -> (Tensor, Tensor, Tensor, Tensor)"
-            )
-            _CUSTOM_OP_LIBRARY.define(
-                "sdlinoss_ex_forward(Tensor A, Tensor G, Tensor step, Tensor bu) -> Tensor"
-            )
-            _CUSTOM_OP_LIBRARY.define(
-                "sdlinoss_ex_backward(Tensor A, Tensor G, Tensor step, Tensor bu, Tensor states, Tensor grad_output) -> (Tensor, Tensor, Tensor, Tensor)"
-            )
-
-            _registration_failed = {"flag": False}
-
-            def _register_kernel_impl(name: str, fn) -> None:
-                try:
-                    _CUSTOM_OP_LIBRARY.impl(name, fn, "CompositeExplicitAutograd")
-                except RuntimeError:
-                    _registration_failed["flag"] = True
-
-            if _CUSTOM_OP_LIBRARY is not None:
-                _register_kernel_impl("sdlinoss_imex1_forward", _kernels.sdlinoss_imex1_forward)
-
-                def _sdlinoss_imex1_backward_impl(A, G, step, bu, states, grad_output):
-                    return _kernels.sdlinoss_imex1_backward(A, G, step, bu, states, grad_output)
-
-                _register_kernel_impl("sdlinoss_imex1_backward", _sdlinoss_imex1_backward_impl)
-                _register_kernel_impl("sdlinoss_imex2_forward", _kernels.sdlinoss_imex2_forward)
-
-                def _sdlinoss_imex2_backward_impl(A, G, step, bu, states, grad_output):
-                    return _kernels.sdlinoss_imex2_backward(A, G, step, bu, states, grad_output)
-
-                _register_kernel_impl("sdlinoss_imex2_backward", _sdlinoss_imex2_backward_impl)
-                _register_kernel_impl("sdlinoss_im_forward", _kernels.sdlinoss_im_forward)
-
-                def _sdlinoss_im_backward_impl(A, G, step, bu, states, grad_output):
-                    return _kernels.sdlinoss_im_backward(A, G, step, bu, states, grad_output)
-
-                _register_kernel_impl("sdlinoss_im_backward", _sdlinoss_im_backward_impl)
-                _register_kernel_impl("sdlinoss_ex_forward", _kernels.sdlinoss_ex_forward)
-
-                def _sdlinoss_ex_backward_impl(A, G, step, bu, states, grad_output):
-                    return _kernels.sdlinoss_ex_backward(A, G, step, bu, states, grad_output)
-
-                _register_kernel_impl("sdlinoss_ex_backward", _sdlinoss_ex_backward_impl)
-                if _registration_failed["flag"]:
-                    _CUSTOM_OP_LIBRARY = None
-        except RuntimeError:
-            _CUSTOM_OP_LIBRARY = None
-    except ImportError:  # pragma: no cover - very old torch versions
-        _CUSTOM_OP_LIBRARY = None
-
 
 def _infer_real_dtype_from_complex(z: Tensor) -> torch.dtype:
     if z.dtype == torch.complex64:
@@ -291,10 +215,7 @@ class _SdlinossImex1Fn(torch.autograd.Function):
         if kernels is None:
             raise RuntimeError("Selective D-LinOSS kernels are unavailable; cannot use optimized path.")
 
-        if _CUSTOM_OP_LIBRARY is not None:
-            states = torch.ops.ossm.sdlinoss_imex1_forward(A, G, step, bu)  # type: ignore[attr-defined]
-        else:
-            states = kernels.sdlinoss_imex1_forward(A, G, step, bu)
+        states = kernels.sdlinoss_imex1_forward(A, G, step, bu)
         ctx.save_for_backward(A, G, step, bu, states)
         return states[..., 1]
 
@@ -306,12 +227,7 @@ class _SdlinossImex1Fn(torch.autograd.Function):
             raise RuntimeError("Selective D-LinOSS kernels are unavailable; cannot use optimized path.")
 
         grad_output = grad_output.contiguous()
-        if _CUSTOM_OP_LIBRARY is not None:
-            grad_A, grad_G, grad_step, grad_bu = torch.ops.ossm.sdlinoss_imex1_backward(  # type: ignore[attr-defined]
-                A, G, step, bu, states, grad_output
-            )
-        else:
-            grad_A, grad_G, grad_step, grad_bu = kernels.sdlinoss_imex1_backward(A, G, step, bu, states, grad_output)
+        grad_A, grad_G, grad_step, grad_bu = kernels.sdlinoss_imex1_backward(A, G, step, bu, states, grad_output)
         return grad_A, grad_G, grad_step, grad_bu
 
 
@@ -322,10 +238,7 @@ class _SdlinossImex2Fn(torch.autograd.Function):
         if kernels is None:
             raise RuntimeError("Selective D-LinOSS kernels are unavailable; cannot use optimized path.")
 
-        if _CUSTOM_OP_LIBRARY is not None:
-            states = torch.ops.ossm.sdlinoss_imex2_forward(A, G, step, bu)  # type: ignore[attr-defined]
-        else:
-            states = kernels.sdlinoss_imex2_forward(A, G, step, bu)
+        states = kernels.sdlinoss_imex2_forward(A, G, step, bu)
         ctx.save_for_backward(A, G, step, bu, states)
         return states[..., 1]
 
@@ -337,12 +250,7 @@ class _SdlinossImex2Fn(torch.autograd.Function):
             raise RuntimeError("Selective D-LinOSS kernels are unavailable; cannot use optimized path.")
 
         grad_output = grad_output.contiguous()
-        if _CUSTOM_OP_LIBRARY is not None:
-            grad_A, grad_G, grad_step, grad_bu = torch.ops.ossm.sdlinoss_imex2_backward(  # type: ignore[attr-defined]
-                A, G, step, bu, states, grad_output
-            )
-        else:
-            grad_A, grad_G, grad_step, grad_bu = kernels.sdlinoss_imex2_backward(A, G, step, bu, states, grad_output)
+        grad_A, grad_G, grad_step, grad_bu = kernels.sdlinoss_imex2_backward(A, G, step, bu, states, grad_output)
         return grad_A, grad_G, grad_step, grad_bu
 
 
@@ -353,10 +261,7 @@ class _SdlinossImFn(torch.autograd.Function):
         if kernels is None:
             raise RuntimeError("Selective D-LinOSS kernels are unavailable; cannot use optimized path.")
 
-        if _CUSTOM_OP_LIBRARY is not None:
-            states = torch.ops.ossm.sdlinoss_im_forward(A, G, step, bu)  # type: ignore[attr-defined]
-        else:
-            states = kernels.sdlinoss_im_forward(A, G, step, bu)
+        states = kernels.sdlinoss_im_forward(A, G, step, bu)
         ctx.save_for_backward(A, G, step, bu, states)
         return states[..., 1]
 
@@ -368,12 +273,7 @@ class _SdlinossImFn(torch.autograd.Function):
             raise RuntimeError("Selective D-LinOSS kernels are unavailable; cannot use optimized path.")
 
         grad_output = grad_output.contiguous()
-        if _CUSTOM_OP_LIBRARY is not None:
-            grad_A, grad_G, grad_step, grad_bu = torch.ops.ossm.sdlinoss_im_backward(  # type: ignore[attr-defined]
-                A, G, step, bu, states, grad_output
-            )
-        else:
-            grad_A, grad_G, grad_step, grad_bu = kernels.sdlinoss_im_backward(A, G, step, bu, states, grad_output)
+        grad_A, grad_G, grad_step, grad_bu = kernels.sdlinoss_im_backward(A, G, step, bu, states, grad_output)
         return grad_A, grad_G, grad_step, grad_bu
 
 
@@ -384,10 +284,7 @@ class _SdlinossExFn(torch.autograd.Function):
         if kernels is None:
             raise RuntimeError("Selective D-LinOSS kernels are unavailable; cannot use optimized path.")
 
-        if _CUSTOM_OP_LIBRARY is not None:
-            states = torch.ops.ossm.sdlinoss_ex_forward(A, G, step, bu)  # type: ignore[attr-defined]
-        else:
-            states = kernels.sdlinoss_ex_forward(A, G, step, bu)
+        states = kernels.sdlinoss_ex_forward(A, G, step, bu)
         ctx.save_for_backward(A, G, step, bu, states)
         return states[..., 1]
 
@@ -399,12 +296,7 @@ class _SdlinossExFn(torch.autograd.Function):
             raise RuntimeError("Selective D-LinOSS kernels are unavailable; cannot use optimized path.")
 
         grad_output = grad_output.contiguous()
-        if _CUSTOM_OP_LIBRARY is not None:
-            grad_A, grad_G, grad_step, grad_bu = torch.ops.ossm.sdlinoss_ex_backward(  # type: ignore[attr-defined]
-                A, G, step, bu, states, grad_output
-            )
-        else:
-            grad_A, grad_G, grad_step, grad_bu = kernels.sdlinoss_ex_backward(A, G, step, bu, states, grad_output)
+        grad_A, grad_G, grad_step, grad_bu = kernels.sdlinoss_ex_backward(A, G, step, bu, states, grad_output)
         return grad_A, grad_G, grad_step, grad_bu
 
 
