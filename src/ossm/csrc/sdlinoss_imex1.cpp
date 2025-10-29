@@ -228,6 +228,11 @@ void sdlinoss_imex1_backward_cpu_kernel(
 }
 
 #ifdef WITH_CUDA
+}  // end anonymous namespace
+
+// Declare CUDA implementations with external linkage in the ossm namespace to
+// match the definitions in sdlinoss_imex1_cuda.cu and avoid undefined symbols at
+// import time.
 void sdlinoss_imex1_forward_cuda(const at::Tensor& A,
                                  const at::Tensor& G,
                                  const at::Tensor& step,
@@ -244,6 +249,8 @@ void sdlinoss_imex1_backward_cuda(const at::Tensor& A,
                                   at::Tensor& grad_G,
                                   at::Tensor& grad_step,
                                   at::Tensor& grad_bu);
+
+namespace {  // reopen anonymous namespace for the remaining helpers
 #endif
 
 }  // namespace
@@ -375,4 +382,3 @@ std::vector<at::Tensor> sdlinoss_imex1_backward(const at::Tensor& A,
 }
 
 }  // namespace ossm
-
