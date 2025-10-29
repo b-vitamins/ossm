@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Tuple
 
 import torch
 from torch import Tensor, autocast, nn
 
+from ._sdlinoss_scan import run_sdlinoss
 from .base import Backbone, ResidualSSMBlock, SequenceBackboneOutput
 from .linoss import GatedLinearUnit
 
@@ -20,92 +21,6 @@ __all__ = [
 ]
 
 _VALID_VARIANTS = ("imex1", "imex2", "im", "ex")
-
-
-@torch.no_grad()
-def _infer_real_dtype_from_complex(z: Tensor) -> torch.dtype:
-    if z.dtype == torch.complex64:
-        return torch.float32
-    if z.dtype == torch.complex128:
-        return torch.float64
-    raise TypeError(f"Expected complex64/complex128, got {z.dtype}.")
-
-
-def _expand_param(p: Tensor, L: int, B: int, M: int, *, device, dtype) -> Tensor:
-    """Broadcast parameters to ``(L, B, M)``."""
-
-    if p.dim() == 1 and p.shape[0] == M:
-        return p.view(1, 1, M).to(device=device, dtype=dtype).expand(L, B, M)
-    if p.dim() == 2 and p.shape == (L, M):
-        return p.view(L, 1, M).to(device=device, dtype=dtype).expand(L, B, M)
-    if p.dim() == 2 and p.shape == (B, M):
-        return p.view(1, B, M).to(device=device, dtype=dtype).expand(L, B, M)
-    if p.dim() == 3 and p.shape == (L, B, M):
-        return p.to(device=device, dtype=dtype)
-    raise ValueError(
-        "Parameter must be (M,), (L,M), (B,M) or (L,B,M); "
-        f"got {tuple(p.shape)}."
-    )
-
-
-def run_sdlinoss(
-    variant: str,
-    a_diag: Tensor,
-    g_diag: Tensor,
-    step: Tensor,
-    bu_seq: Tensor,
-) -> Tensor:
-    """Pure PyTorch scan for the selective D-LinOSS recurrence."""
-
-    variant = variant.lower()
-    if variant not in _VALID_VARIANTS:
-        raise ValueError(
-            f"Unsupported variant '{variant}'. "
-            f"Expected one of {', '.join(_VALID_VARIANTS)}."
-        )
-
-    if bu_seq.dim() != 3:
-        raise ValueError("bu_seq must be (L,B,M) complex.")
-    L, B, M = bu_seq.shape
-    device = bu_seq.device
-    c_real = _infer_real_dtype_from_complex(bu_seq)
-
-    A = _expand_param(a_diag, L, B, M, device=device, dtype=c_real)
-    G = _expand_param(g_diag, L, B, M, device=device, dtype=c_real)
-    dt = _expand_param(step, L, B, M, device=device, dtype=c_real)
-    dt = torch.clamp(dt, min=1e-6, max=1.0)
-
-    z = torch.zeros(B, M, dtype=bu_seq.dtype, device=device)
-    x = torch.zeros(B, M, dtype=bu_seq.dtype, device=device)
-
-    xs: List[Tensor] = []
-    if variant == "imex1":
-        for t in range(L):
-            S = 1.0 + dt[t] * G[t]
-            z = (z + dt[t] * (-A[t] * x + bu_seq[t])) / torch.clamp(S, min=1e-6)
-            x = x + dt[t] * z
-            xs.append(x)
-    elif variant == "imex2":
-        for t in range(L):
-            S = 1.0 + (dt[t] * dt[t]) * A[t]
-            z = (z + dt[t] * (-A[t] * x - G[t] * z + bu_seq[t])) / torch.clamp(
-                S, min=1e-6
-            )
-            x = x + dt[t] * z
-            xs.append(x)
-    elif variant == "im":
-        for t in range(L):
-            S = 1.0 + dt[t] * G[t] + (dt[t] * dt[t]) * A[t]
-            z = (z + dt[t] * (-A[t] * x + bu_seq[t])) / torch.clamp(S, min=1e-6)
-            x = x + dt[t] * z
-            xs.append(x)
-    else:  # "ex"
-        for t in range(L):
-            z = z + dt[t] * (-A[t] * x - G[t] * z + bu_seq[t])
-            x = x + dt[t] * z
-            xs.append(x)
-
-    return torch.stack(xs, dim=0)
 
 
 @dataclass
