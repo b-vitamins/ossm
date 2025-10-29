@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, Protocol, Tuple, cast
+from typing import Any, Callable, Optional, Protocol, Tuple, cast
 
 import torch
 from torch import Tensor, autocast
@@ -17,7 +17,7 @@ __all__ = [
 _SUPPORTED_VARIANTS: Tuple[str, ...] = ("imex1", "imex2", "im", "ex")
 
 
-def _maybe_dynamo_module():
+def _maybe_dynamo_module() -> Optional[Any]:
     try:
         import torch._dynamo as _dynamo  # type: ignore[attr-defined]
     except Exception:  # pragma: no cover - defensive for older torch
@@ -334,7 +334,13 @@ def run_sdlinoss(variant: str, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu:
         if _dynamo is not None:
             try:
                 if _dynamo.is_compiling():  # pragma: no cover - runtime guard
-                    return cast(Tensor, _dynamo.disable()(_fallback)())
+                    disable = getattr(_dynamo, "disable", None)
+                    if disable is not None and callable(disable):
+                        disable_fn = cast(
+                            "Callable[[Callable[[], Tensor]], Callable[[], Tensor]]",
+                            disable,
+                        )
+                        return cast(Tensor, disable_fn(_fallback)())
             except RuntimeError:
                 pass
         with autocast("cuda", enabled=False):
