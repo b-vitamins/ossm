@@ -4,6 +4,7 @@
 #include <torch/extension.h>
 
 #include "dlinoss_common.h"
+#include "sdlinoss_cpu_utils.h"
 
 namespace ossm {
 namespace {
@@ -337,14 +338,14 @@ torch::Tensor sdlinoss_imex2_forward(const at::Tensor& A,
     TORCH_CHECK(false, "sdlinoss_imex2 CUDA extension was not built");
 #endif
   } else {
-    TORCH_CHECK(A.dim() == 3 && G.dim() == 3 && step.dim() == 3,
-                "A, G, and step must have shape (length, batch, ssm_size)");
-    TORCH_CHECK(A.sizes() == bu.sizes() && G.sizes() == bu.sizes() && step.sizes() == bu.sizes(),
-                "A, G, and step must match bu shape");
-    TORCH_CHECK(A.is_contiguous() && G.is_contiguous() && step.is_contiguous(),
-                "A, G, and step must be contiguous");
     TORCH_CHECK(bu.is_contiguous(), "bu must be contiguous");
-    sdlinoss_imex2_forward_cpu(A, G, step, bu, output);
+    const auto A_view = normalize_param_view_cpu(A, "A", length, batch, ssm);
+    const auto G_view = normalize_param_view_cpu(G, "G", length, batch, ssm);
+    const auto step_view = normalize_param_view_cpu(step, "step", length, batch, ssm);
+    const auto A_broadcast = materialize_param_cpu(A_view, length, batch, ssm);
+    const auto G_broadcast = materialize_param_cpu(G_view, length, batch, ssm);
+    const auto step_broadcast = materialize_param_cpu(step_view, length, batch, ssm);
+    sdlinoss_imex2_forward_cpu(A_broadcast, G_broadcast, step_broadcast, bu, output);
   }
 
   return output;
@@ -359,14 +360,16 @@ std::vector<at::Tensor> sdlinoss_imex2_backward(const at::Tensor& A,
   TORCH_CHECK(states.dim() == 4 && states.size(3) == 2,
               "states must have shape (length, batch, ssm_size, 2)");
   TORCH_CHECK(bu.dim() == 3, "bu must have shape (length, batch, ssm_size)");
-  TORCH_CHECK(A.sizes() == bu.sizes() && G.sizes() == bu.sizes() && step.sizes() == bu.sizes(),
-              "A, G, and step must match bu shape");
   TORCH_CHECK(grad_output.sizes() == bu.sizes(), "grad_output must match bu shape");
 
-  auto grad_A = at::zeros_like(A);
-  auto grad_G = at::zeros_like(G);
-  auto grad_step = at::zeros_like(step);
-  auto grad_bu = at::empty_like(bu);
+  const auto length = bu.size(0);
+  const auto batch = bu.size(1);
+  const auto ssm = bu.size(2);
+
+  at::Tensor grad_A;
+  at::Tensor grad_G;
+  at::Tensor grad_step;
+  at::Tensor grad_bu;
 
   if (bu.is_cuda()) {
 #ifdef WITH_CUDA
@@ -375,16 +378,44 @@ std::vector<at::Tensor> sdlinoss_imex2_backward(const at::Tensor& A,
     validate_strided3_dims(step);
     TORCH_CHECK(states.is_contiguous() && grad_output.is_contiguous(),
                 "states and grad_output must be contiguous on CUDA");
+    grad_A = at::zeros_like(A);
+    grad_G = at::zeros_like(G);
+    grad_step = at::zeros_like(step);
+    grad_bu = at::empty_like(bu);
     sdlinoss_imex2_backward_cuda(A, G, step, bu, states, grad_output, grad_A, grad_G, grad_step, grad_bu);
 #else
     TORCH_CHECK(false, "sdlinoss_imex2 CUDA extension was not built");
 #endif
   } else {
-    TORCH_CHECK(A.is_contiguous() && G.is_contiguous() && step.is_contiguous(),
-                "A, G, and step must be contiguous");
     TORCH_CHECK(bu.is_contiguous() && states.is_contiguous() && grad_output.is_contiguous(),
                 "bu, states, and grad_output must be contiguous");
-    sdlinoss_imex2_backward_cpu(A, G, step, bu, states, grad_output, grad_A, grad_G, grad_step, grad_bu);
+    const auto A_view = normalize_param_view_cpu(A, "A", length, batch, ssm);
+    const auto G_view = normalize_param_view_cpu(G, "G", length, batch, ssm);
+    const auto step_view = normalize_param_view_cpu(step, "step", length, batch, ssm);
+
+    const auto A_broadcast = materialize_param_cpu(A_view, length, batch, ssm);
+    const auto G_broadcast = materialize_param_cpu(G_view, length, batch, ssm);
+    const auto step_broadcast = materialize_param_cpu(step_view, length, batch, ssm);
+
+    auto grad_A_buffer = at::zeros({length, batch, ssm}, A.options());
+    auto grad_G_buffer = at::zeros({length, batch, ssm}, G.options());
+    auto grad_step_buffer = at::zeros({length, batch, ssm}, step.options());
+    grad_bu = at::empty_like(bu);
+
+    sdlinoss_imex2_backward_cpu(A_broadcast,
+                                G_broadcast,
+                                step_broadcast,
+                                bu,
+                                states,
+                                grad_output,
+                                grad_A_buffer,
+                                grad_G_buffer,
+                                grad_step_buffer,
+                                grad_bu);
+
+    grad_A = reduce_broadcast_grad(grad_A_buffer, A_view, length, batch).reshape(A.sizes());
+    grad_G = reduce_broadcast_grad(grad_G_buffer, G_view, length, batch).reshape(G.sizes());
+    grad_step = reduce_broadcast_grad(grad_step_buffer, step_view, length, batch).reshape(step.sizes());
   }
 
   return {grad_A, grad_G, grad_step, grad_bu};
