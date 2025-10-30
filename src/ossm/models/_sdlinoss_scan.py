@@ -198,7 +198,6 @@ def _reference_sdlinoss_states(variant: str, a_diag: Tensor, g_diag: Tensor, ste
 
     length, batch, ssm = bu.shape
     device = bu.device
-    complex_dtype = bu.dtype
     real_dtype = _infer_real_dtype_from_complex(bu)
 
     if not bu.is_complex():
