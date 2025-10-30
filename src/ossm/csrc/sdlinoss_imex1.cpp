@@ -1,6 +1,7 @@
 #include <ATen/Parallel.h>
 #include <ATen/TensorOperators.h>
 #include <c10/util/Exception.h>
+#include <cmath>
 #include <torch/extension.h>
 
 #include "dlinoss_common.h"
@@ -70,13 +71,13 @@ void sdlinoss_imex1_forward_cpu_kernel(
         const value_t bu_real = bu_val.real();
         const value_t bu_imag = bu_val.imag();
 
-        const value_t tmp_real = z_real + dt * (-a_t * x_real + bu_real);
-        const value_t tmp_imag = z_imag + dt * (-a_t * x_imag + bu_imag);
+        const value_t tmp_real = std::fma(dt, (-a_t * x_real + bu_real), z_real);
+        const value_t tmp_imag = std::fma(dt, (-a_t * x_imag + bu_imag), z_imag);
 
         const value_t new_z_real = tmp_real * inv_S;
         const value_t new_z_imag = tmp_imag * inv_S;
-        const value_t new_x_real = x_real + dt * new_z_real;
-        const value_t new_x_imag = x_imag + dt * new_z_imag;
+        const value_t new_x_real = std::fma(dt, new_z_real, x_real);
+        const value_t new_x_imag = std::fma(dt, new_z_imag, x_imag);
 
         const int64_t out_offset = t * step_stride + idx * 2;
         out_ptr[out_offset] = scalar_t(new_z_real, new_z_imag);
