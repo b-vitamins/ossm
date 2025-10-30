@@ -210,9 +210,9 @@ class SelectiveDLinOSSLayer(nn.Module):
         ).to(device=device, dtype=scan_complex_dtype)
         flat_inputs = inputs.to(dtype=compute_dtype).reshape(B * L, H)
         flat_inputs_complex = flat_inputs.to(dtype=scan_complex_dtype)
-        bu = (
-            flat_inputs_complex @ B_complex.conj().transpose(0, 1)
-        ).reshape(B, L, self.ssm_size)
+        bu = (flat_inputs_complex @ B_complex.transpose(0, 1)).reshape(
+            B, L, self.ssm_size
+        )
 
         if self.inj_head is not None:
             base = self.inj_logit.view(1, 1, -1).to(feats)
@@ -229,7 +229,7 @@ class SelectiveDLinOSSLayer(nn.Module):
 
         states = x_seq.permute(1, 0, 2).contiguous().reshape(B * L, self.ssm_size)
 
-        proj_complex = states @ C_complex.conj().transpose(0, 1)
+        proj_complex = states @ C_complex.transpose(0, 1)
         proj = proj_complex.real.to(dtype=compute_dtype).reshape(B, L, self.hidden_dim)
 
         out = proj + inputs.to(dtype=compute_dtype) * self.D.to(dtype=compute_dtype).view(1, 1, -1)
