@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Tuple
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, autocast, nn
 
 from ._sdlinoss_scan import run_sdlinoss
@@ -92,13 +93,12 @@ class SelectiveDLinOSSLayer(nn.Module):
         self.D = nn.Parameter(torch.empty(hidden_dim))
 
         k = self.cfg.conv_kernel
-        pad = max(k - 1, 0)
         self.enc_linear = nn.Linear(hidden_dim, hidden_dim)
         self.enc_conv = nn.Conv1d(
             hidden_dim,
             hidden_dim,
             kernel_size=k,
-            padding=pad,
+            padding=0,
             groups=hidden_dim,
         )
         self.enc_act = nn.SiLU()
@@ -116,7 +116,12 @@ class SelectiveDLinOSSLayer(nn.Module):
         if self.dt_head is not None:
             nn.init.zeros_(self.dt_head.weight)
 
-        self.inj_head = nn.Linear(hidden_dim, ssm_size, bias=False) if self.cfg.selective_injection else None
+        self.inj_head = (
+            nn.Linear(hidden_dim, ssm_size, bias=False) if self.cfg.selective_injection else None
+        )
+        self.inj_logit = (
+            nn.Parameter(torch.full((ssm_size,), 2.0)) if self.cfg.selective_injection else None
+        )
         if self.inj_head is not None:
             nn.init.zeros_(self.inj_head.weight)
 
@@ -163,10 +168,10 @@ class SelectiveDLinOSSLayer(nn.Module):
 
         feats = self.enc_act(self.enc_linear(inputs))
         feats_c = feats.transpose(1, 2).contiguous()
+        left = max(self.cfg.conv_kernel - 1, 0)
+        feats_c = F.pad(feats_c, (left, 0))
         feats_c = self.enc_act(self.enc_conv(feats_c))
         feats = feats_c.transpose(1, 2).contiguous()
-        if feats.size(1) != L:
-            feats = feats[:, :L, :]
 
         delta_r = self.r_head(feats)
         delta_th = self.th_head(feats)
@@ -184,23 +189,34 @@ class SelectiveDLinOSSLayer(nn.Module):
         r2 = torch.clamp(r * r, min=1e-8)
         cos_t = torch.cos(theta)
         dtc = torch.clamp(dt, min=1e-6)
-        A = (r2 - 2.0 * r * cos_t + 1.0) / (dtc * dtc * r2)
-        G = (1.0 - r2) / (dtc * r2)
-        A = torch.clamp(A, min=0.0)
-        G = torch.clamp(G, min=0.0)
+        if self.variant == "imex1":
+            A = (r2 - 2.0 * r * cos_t + 1.0) / (dtc * dtc * r2)
+            G = (1.0 - r2) / (dtc * r2)
+        elif self.variant == "imex2":
+            A = (r2 - 2.0 * r * cos_t + 1.0) / (dtc * dtc)
+            G = (1.0 - r2) / dtc
+        elif self.variant == "im":
+            A = (r2 - 2.0 * r * cos_t + 1.0) / (dtc * dtc * r2)
+            G = (-2.0 * r2 + 2.0 * r * cos_t) / (dtc * r2)
+        else:
+            A = (r2 - 2.0 * r * cos_t + 1.0) / (dtc * dtc)
+            G = (2.0 - 2.0 * r * cos_t) / dtc
 
-        b_real = self.B[..., 0].to(device=device, dtype=compute_dtype)
-        b_imag = self.B[..., 1].to(device=device, dtype=compute_dtype)
+        B_complex = torch.view_as_complex(
+            self.B.to(dtype=scan_real_dtype)
+        ).to(device=device, dtype=scan_complex_dtype)
+        C_complex = torch.view_as_complex(
+            self.C.to(dtype=scan_real_dtype)
+        ).to(device=device, dtype=scan_complex_dtype)
         flat_inputs = inputs.to(dtype=compute_dtype).reshape(B * L, H)
-        bu_real = flat_inputs @ b_real.transpose(0, 1)
-        bu_imag = flat_inputs @ b_imag.transpose(0, 1)
-        bu = torch.complex(
-            bu_real.to(dtype=scan_real_dtype),
-            bu_imag.to(dtype=scan_real_dtype),
-        ).to(dtype=scan_complex_dtype).reshape(B, L, self.ssm_size)
+        flat_inputs_complex = flat_inputs.to(dtype=scan_complex_dtype)
+        bu = (
+            flat_inputs_complex @ B_complex.conj().transpose(0, 1)
+        ).reshape(B, L, self.ssm_size)
 
         if self.inj_head is not None:
-            gate = torch.sigmoid(self.inj_head(feats)).to(dtype=scan_real_dtype)
+            base = self.inj_logit.view(1, 1, -1).to(feats)
+            gate = torch.sigmoid(base + self.inj_head(feats)).to(dtype=scan_real_dtype)
             bu = bu * gate.to(dtype=bu.dtype)
 
         A_seq = A.to(dtype=scan_real_dtype).permute(1, 0, 2).contiguous()
@@ -212,13 +228,9 @@ class SelectiveDLinOSSLayer(nn.Module):
             x_seq = run_sdlinoss(self.variant, A_seq, G_seq, dt_seq, bu_seq)
 
         states = x_seq.permute(1, 0, 2).contiguous().reshape(B * L, self.ssm_size)
-        states_real = states.real.to(dtype=compute_dtype)
-        states_imag = states.imag.to(dtype=compute_dtype)
 
-        c_real = self.C[..., 0].to(device=device, dtype=compute_dtype)
-        c_imag = self.C[..., 1].to(device=device, dtype=compute_dtype)
-        proj = states_real @ c_real.transpose(0, 1) - states_imag @ c_imag.transpose(0, 1)
-        proj = proj.reshape(B, L, self.hidden_dim)
+        proj_complex = states @ C_complex.conj().transpose(0, 1)
+        proj = proj_complex.real.to(dtype=compute_dtype).reshape(B, L, self.hidden_dim)
 
         out = proj + inputs.to(dtype=compute_dtype) * self.D.to(dtype=compute_dtype).view(1, 1, -1)
         return out.to(dtype=dtype) if compute_dtype != dtype else out
