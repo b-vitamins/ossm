@@ -3,6 +3,8 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 
+#include "dlinoss_common.h"
+
 namespace ossm {
 namespace {
 
@@ -25,10 +27,10 @@ __device__ inline value_t clamp_stability(value_t raw) {
 
 template <typename scalar_t>
 __global__ void sdlinoss_imex1_forward_kernel(
-    const typename scalar_t::value_type* __restrict__ A,
-    const typename scalar_t::value_type* __restrict__ G,
-    const typename scalar_t::value_type* __restrict__ step,
-    const scalar_t* __restrict__ bu_ptr,
+    Strided3<typename scalar_t::value_type> A,
+    Strided3<typename scalar_t::value_type> G,
+    Strided3<typename scalar_t::value_type> step,
+    Strided3<scalar_t> bu,
     scalar_t* __restrict__ out_ptr,
     int64_t length,
     int64_t batch,
@@ -39,6 +41,8 @@ __global__ void sdlinoss_imex1_forward_kernel(
   const int64_t step_stride = series * 2;
 
   for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < series; idx += blockDim.x * gridDim.x) {
+    const int64_t b = idx / ssm;
+    const int64_t m = idx % ssm;
     value_t z_real = value_t(0);
     value_t z_imag = value_t(0);
     value_t x_real = value_t(0);
@@ -46,16 +50,16 @@ __global__ void sdlinoss_imex1_forward_kernel(
 
     for (int64_t t = 0; t < length; ++t) {
       const int64_t offset = t * series + idx;
-      const value_t a_t = A[offset];
-      const value_t g_t = G[offset];
-      const value_t step_raw = step[offset];
+      const value_t a_t = A.load(t, b, m);
+      const value_t g_t = G.load(t, b, m);
+      const value_t step_raw = step.load(t, b, m);
       const value_t dt = clamp_step(step_raw);
 
       const value_t S_raw = value_t(1) + dt * g_t;
       const value_t S = clamp_stability(S_raw);
       const value_t inv_S = value_t(1) / S;
 
-      const scalar_t bu_val = bu_ptr[offset];
+      const scalar_t bu_val = bu.load(t, b, m);
       const value_t bu_real = bu_val.real();
       const value_t bu_imag = bu_val.imag();
 
@@ -81,10 +85,10 @@ __global__ void sdlinoss_imex1_forward_kernel(
 
 template <typename scalar_t>
 __global__ void sdlinoss_imex1_backward_kernel(
-    const typename scalar_t::value_type* __restrict__ A,
-    const typename scalar_t::value_type* __restrict__ G,
-    const typename scalar_t::value_type* __restrict__ step,
-    const scalar_t* __restrict__ bu_ptr,
+    Strided3<typename scalar_t::value_type> A,
+    Strided3<typename scalar_t::value_type> G,
+    Strided3<typename scalar_t::value_type> step,
+    Strided3<scalar_t> bu,
     const scalar_t* __restrict__ states_ptr,
     const scalar_t* __restrict__ grad_out_ptr,
     scalar_t* __restrict__ grad_bu_ptr,
@@ -100,6 +104,8 @@ __global__ void sdlinoss_imex1_backward_kernel(
   const int64_t step_stride = series * 2;
 
   for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < series; idx += blockDim.x * gridDim.x) {
+    const int64_t b = idx / ssm;
+    const int64_t m = idx % ssm;
     value_t grad_z_next_real = value_t(0);
     value_t grad_z_next_imag = value_t(0);
     value_t grad_x_next_real = value_t(0);
@@ -136,13 +142,13 @@ __global__ void sdlinoss_imex1_backward_kernel(
       value_t grad_z_new_real = grad_z_next_real;
       value_t grad_z_new_imag = grad_z_next_imag;
 
-      const value_t a_t = A[offset];
-      const value_t g_t = G[offset];
-      const value_t step_raw = step[offset];
+      const value_t a_t = A.load(t, b, m);
+      const value_t g_t = G.load(t, b, m);
+      const value_t step_raw = step.load(t, b, m);
       const value_t dt = clamp_step(step_raw);
       const value_t step_mask = (step_raw > value_t(kDtMin) && step_raw < value_t(kDtMax)) ? value_t(1) : value_t(0);
 
-      const scalar_t bu_val = bu_ptr[offset];
+      const scalar_t bu_val = bu.load(t, b, m);
       const value_t bu_real = bu_val.real();
       const value_t bu_imag = bu_val.imag();
 
@@ -220,13 +226,18 @@ void sdlinoss_imex1_forward_cuda(const at::Tensor& A,
       1, std::min<int64_t>((series + threads - 1) / threads, at::cuda::getCurrentDeviceProperties()->maxGridSize[0]));
 
   AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "sdlinoss_imex1_forward_cuda", [&] {
+    const auto length = bu.size(0);
+    const auto A_strided = make_strided3<typename scalar_t::value_type>(A, length, batch, ssm);
+    const auto G_strided = make_strided3<typename scalar_t::value_type>(G, length, batch, ssm);
+    const auto step_strided = make_strided3<typename scalar_t::value_type>(step, length, batch, ssm);
+    const auto bu_strided = make_strided3<scalar_t>(bu, length, batch, ssm);
     sdlinoss_imex1_forward_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-        A.data_ptr<typename scalar_t::value_type>(),
-        G.data_ptr<typename scalar_t::value_type>(),
-        step.data_ptr<typename scalar_t::value_type>(),
-        bu.data_ptr<scalar_t>(),
+        A_strided,
+        G_strided,
+        step_strided,
+        bu_strided,
         output.data_ptr<scalar_t>(),
-        bu.size(0),
+        length,
         batch,
         ssm);
   });
@@ -254,18 +265,23 @@ void sdlinoss_imex1_backward_cuda(const at::Tensor& A,
       1, std::min<int64_t>((series + threads - 1) / threads, at::cuda::getCurrentDeviceProperties()->maxGridSize[0]));
 
   AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "sdlinoss_imex1_backward_cuda", [&] {
+    const auto length = bu.size(0);
+    const auto A_strided = make_strided3<typename scalar_t::value_type>(A, length, batch, ssm);
+    const auto G_strided = make_strided3<typename scalar_t::value_type>(G, length, batch, ssm);
+    const auto step_strided = make_strided3<typename scalar_t::value_type>(step, length, batch, ssm);
+    const auto bu_strided = make_strided3<scalar_t>(bu, length, batch, ssm);
     sdlinoss_imex1_backward_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-        A.data_ptr<typename scalar_t::value_type>(),
-        G.data_ptr<typename scalar_t::value_type>(),
-        step.data_ptr<typename scalar_t::value_type>(),
-        bu.data_ptr<scalar_t>(),
+        A_strided,
+        G_strided,
+        step_strided,
+        bu_strided,
         states.data_ptr<scalar_t>(),
         grad_output.data_ptr<scalar_t>(),
         grad_bu.data_ptr<scalar_t>(),
         grad_A.data_ptr<typename scalar_t::value_type>(),
         grad_G.data_ptr<typename scalar_t::value_type>(),
         grad_step.data_ptr<typename scalar_t::value_type>(),
-        bu.size(0),
+        length,
         batch,
         ssm);
   });
