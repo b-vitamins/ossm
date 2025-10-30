@@ -3,6 +3,8 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 
+#include "sdlinoss_common.cuh"
+
 namespace ossm {
 namespace {
 
@@ -24,68 +26,42 @@ __device__ inline value_t clamp_stability(value_t raw) {
 }
 
 template <typename scalar_t>
-__global__ void sdlinoss_imex2_forward_kernel(
-    const typename scalar_t::value_type* __restrict__ A,
-    const typename scalar_t::value_type* __restrict__ G,
-    const typename scalar_t::value_type* __restrict__ step,
-    const scalar_t* __restrict__ bu_ptr,
-    scalar_t* __restrict__ out_ptr,
-    int64_t length,
-    int64_t batch,
-    int64_t ssm) {
+struct Imex2TransitionBuilder {
   using value_t = typename scalar_t::value_type;
 
-  const int64_t series = batch * ssm;
-  const int64_t step_stride = series * 2;
+  __device__ static Transition2x2<value_t> build(value_t a, value_t g, value_t step, scalar_t bu) {
+    const value_t dt = clamp_step(step);
+    const value_t dt2 = dt * dt;
+    const value_t S = clamp_stability(value_t(1) + dt2 * a);
+    const value_t inv_S = value_t(1) / S;
+    const value_t dt_inv_S = dt * inv_S;
 
-  for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < series; idx += blockDim.x * gridDim.x) {
-    value_t z_real = value_t(0);
-    value_t z_imag = value_t(0);
-    value_t x_real = value_t(0);
-    value_t x_imag = value_t(0);
+    Transition2x2<value_t> out;
+    const value_t m00 = (value_t(1) - dt * g) * inv_S;
+    const value_t m01 = (-a * dt) * inv_S;
+    out.m00 = m00;
+    out.m01 = m01;
+    out.m10 = dt * m00;
+    out.m11 = value_t(1) + dt * m01;
 
-    for (int64_t t = 0; t < length; ++t) {
-      const int64_t offset = t * series + idx;
-      const value_t a_t = A[offset];
-      const value_t g_t = G[offset];
-      const value_t step_raw = step[offset];
-      const value_t dt = clamp_step(step_raw);
-      const value_t dt2 = dt * dt;
-
-      const value_t S_raw = value_t(1) + dt2 * a_t;
-      const value_t S = clamp_stability(S_raw);
-      const value_t inv_S = value_t(1) / S;
-
-      const scalar_t bu_val = bu_ptr[offset];
-      const value_t bu_real = bu_val.real();
-      const value_t bu_imag = bu_val.imag();
-
-      const value_t tmp_real = z_real + dt * (-a_t * x_real - g_t * z_real + bu_real);
-      const value_t tmp_imag = z_imag + dt * (-a_t * x_imag - g_t * z_imag + bu_imag);
-
-      const value_t new_z_real = tmp_real * inv_S;
-      const value_t new_z_imag = tmp_imag * inv_S;
-      const value_t new_x_real = x_real + dt * new_z_real;
-      const value_t new_x_imag = x_imag + dt * new_z_imag;
-
-      const int64_t out_offset = t * step_stride + idx * 2;
-      out_ptr[out_offset] = scalar_t(new_z_real, new_z_imag);
-      out_ptr[out_offset + 1] = scalar_t(new_x_real, new_x_imag);
-
-      z_real = new_z_real;
-      z_imag = new_z_imag;
-      x_real = new_x_real;
-      x_imag = new_x_imag;
-    }
+    const value_t bu_real = bu.real();
+    const value_t bu_imag = bu.imag();
+    const value_t f0_scale = dt_inv_S;
+    const value_t f1_scale = dt * f0_scale;
+    out.f0_real = f0_scale * bu_real;
+    out.f0_imag = f0_scale * bu_imag;
+    out.f1_real = f1_scale * bu_real;
+    out.f1_imag = f1_scale * bu_imag;
+    return out;
   }
-}
+};
 
 template <typename scalar_t>
 __global__ void sdlinoss_imex2_backward_kernel(
-    const typename scalar_t::value_type* __restrict__ A,
-    const typename scalar_t::value_type* __restrict__ G,
-    const typename scalar_t::value_type* __restrict__ step,
-    const scalar_t* __restrict__ bu_ptr,
+    StridedView3<typename scalar_t::value_type> A,
+    StridedView3<typename scalar_t::value_type> G,
+    StridedView3<typename scalar_t::value_type> step,
+    StridedView3<scalar_t> bu_view,
     const scalar_t* __restrict__ states_ptr,
     const scalar_t* __restrict__ grad_out_ptr,
     scalar_t* __restrict__ grad_bu_ptr,
@@ -100,7 +76,13 @@ __global__ void sdlinoss_imex2_backward_kernel(
   const int64_t series = batch * ssm;
   const int64_t step_stride = series * 2;
 
+  if (length == 0) {
+    return;
+  }
+
   for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < series; idx += blockDim.x * gridDim.x) {
+    const int64_t b = idx / ssm;
+    const int64_t m = idx % ssm;
     value_t grad_z_next_real = value_t(0);
     value_t grad_z_next_imag = value_t(0);
     value_t grad_x_next_real = value_t(0);
@@ -137,14 +119,14 @@ __global__ void sdlinoss_imex2_backward_kernel(
       value_t grad_z_new_real = grad_z_next_real;
       value_t grad_z_new_imag = grad_z_next_imag;
 
-      const value_t a_t = A[offset];
-      const value_t g_t = G[offset];
-      const value_t step_raw = step[offset];
+      const value_t a_t = A.load(t, b, m);
+      const value_t g_t = G.load(t, b, m);
+      const value_t step_raw = step.load(t, b, m);
       const value_t dt = clamp_step(step_raw);
       const value_t step_mask = (step_raw > value_t(kDtMin) && step_raw < value_t(kDtMax)) ? value_t(1) : value_t(0);
       const value_t dt2 = dt * dt;
 
-      const scalar_t bu_val = bu_ptr[offset];
+      const scalar_t bu_val = bu_view.load(t, b, m);
       const value_t bu_real = bu_val.real();
       const value_t bu_imag = bu_val.imag();
 
@@ -215,24 +197,64 @@ void sdlinoss_imex2_forward_cuda(const at::Tensor& A,
                                  at::Tensor& output) {
   c10::cuda::OptionalCUDAGuard device_guard{bu.device()};
 
+  const auto length = bu.size(0);
   const auto batch = bu.size(1);
   const auto ssm = bu.size(2);
-  const auto series = batch * ssm;
+  if (length == 0) {
+    return;
+  }
 
-  constexpr int64_t threads = 256;
-  const int64_t blocks = std::max<int64_t>(
-      1, std::min<int64_t>((series + threads - 1) / threads, at::cuda::getCurrentDeviceProperties()->maxGridSize[0]));
+  const int64_t num_tiles = (length + kSdlinossTileSteps - 1) / kSdlinossTileSteps;
+  auto real_options = A.options();
+  auto local_prefixes = at::empty({length, batch, ssm, 8}, real_options);
+  auto tile_prefixes = at::empty({num_tiles, batch, ssm, 8}, real_options);
+  auto tile_scans = at::empty({num_tiles, batch, ssm, 8}, real_options);
 
   AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "sdlinoss_imex2_forward_cuda", [&] {
-    sdlinoss_imex2_forward_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-        A.data_ptr<typename scalar_t::value_type>(),
-        G.data_ptr<typename scalar_t::value_type>(),
-        step.data_ptr<typename scalar_t::value_type>(),
-        bu.data_ptr<scalar_t>(),
-        output.data_ptr<scalar_t>(),
-        bu.size(0),
+    const auto A_view = make_strided_view3<typename scalar_t::value_type>(A);
+    const auto G_view = make_strided_view3<typename scalar_t::value_type>(G);
+    const auto step_view = make_strided_view3<typename scalar_t::value_type>(step);
+    const auto bu_view = make_strided_view3<scalar_t>(bu);
+    using value_t = typename scalar_t::value_type;
+    auto* local_ptr = reinterpret_cast<Transition2x2<value_t>*>(local_prefixes.data_ptr<value_t>());
+    auto* tile_prefix_ptr = reinterpret_cast<Transition2x2<value_t>*>(tile_prefixes.data_ptr<value_t>());
+    auto* tile_scan_ptr = reinterpret_cast<Transition2x2<value_t>*>(tile_scans.data_ptr<value_t>());
+
+    auto stream = at::cuda::getCurrentCUDAStream();
+    const dim3 tile_block(kSdlinossTileSteps);
+    const dim3 tile_grid(static_cast<unsigned int>(ssm),
+                         static_cast<unsigned int>(batch),
+                         static_cast<unsigned int>(num_tiles));
+
+    sdlinoss_forward_tile_kernel<scalar_t, Imex2TransitionBuilder<scalar_t>, kSdlinossTileSteps>
+        <<<tile_grid, tile_block, 0, stream>>>(
+            A_view,
+            G_view,
+            step_view,
+            bu_view,
+            local_ptr,
+            tile_prefix_ptr,
+            length,
+            batch,
+            ssm,
+            num_tiles);
+
+    const dim3 prefix_grid(static_cast<unsigned int>(ssm), static_cast<unsigned int>(batch));
+    sdlinoss_forward_prefix_kernel<value_t, kSdlinossTileSteps><<<prefix_grid, tile_block, 0, stream>>>(
+        tile_prefix_ptr,
+        tile_scan_ptr,
+        num_tiles,
         batch,
         ssm);
+
+    sdlinoss_forward_apply_kernel<scalar_t, kSdlinossTileSteps><<<tile_grid, tile_block, 0, stream>>>(
+        local_ptr,
+        tile_scan_ptr,
+        output.data_ptr<scalar_t>(),
+        length,
+        batch,
+        ssm,
+        num_tiles);
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -258,11 +280,15 @@ void sdlinoss_imex2_backward_cuda(const at::Tensor& A,
       1, std::min<int64_t>((series + threads - 1) / threads, at::cuda::getCurrentDeviceProperties()->maxGridSize[0]));
 
   AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "sdlinoss_imex2_backward_cuda", [&] {
+    const auto A_view = make_strided_view3<typename scalar_t::value_type>(A);
+    const auto G_view = make_strided_view3<typename scalar_t::value_type>(G);
+    const auto step_view = make_strided_view3<typename scalar_t::value_type>(step);
+    const auto bu_view = make_strided_view3<scalar_t>(bu);
     sdlinoss_imex2_backward_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-        A.data_ptr<typename scalar_t::value_type>(),
-        G.data_ptr<typename scalar_t::value_type>(),
-        step.data_ptr<typename scalar_t::value_type>(),
-        bu.data_ptr<scalar_t>(),
+        A_view,
+        G_view,
+        step_view,
+        bu_view,
         states.data_ptr<scalar_t>(),
         grad_output.data_ptr<scalar_t>(),
         grad_bu.data_ptr<scalar_t>(),

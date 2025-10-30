@@ -329,7 +329,13 @@ def run_sdlinoss(variant: str, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu:
     if not _use_kernels(variant):
         _graph_break_if_compiling()
         def _fallback() -> Tensor:
-            return _fallback_sdlinoss(variant, A, G, step_expanded, bu.to(complex_dtype))
+            return _fallback_sdlinoss(
+                variant,
+                A.contiguous(),
+                G.contiguous(),
+                step_expanded.contiguous(),
+                bu.to(complex_dtype).contiguous(),
+            )
         _dynamo = _maybe_dynamo_module()
         if _dynamo is not None:
             try:
@@ -346,9 +352,6 @@ def run_sdlinoss(variant: str, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu:
         with autocast("cuda", enabled=False):
             return _fallback()
 
-    A_ctg = A.contiguous()
-    G_ctg = G.contiguous()
-    step_ctg = step_expanded.contiguous()
     bu_ctg = bu.contiguous()
 
     if variant == "imex1":
@@ -361,5 +364,5 @@ def run_sdlinoss(variant: str, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu:
         fn = _SdlinossExFn
 
     with autocast("cuda", enabled=False):
-        return cast(Tensor, fn.apply(A_ctg, G_ctg, step_ctg, bu_ctg))
+        return cast(Tensor, fn.apply(A, G, step_expanded, bu_ctg))
 
