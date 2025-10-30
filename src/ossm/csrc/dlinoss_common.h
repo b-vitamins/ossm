@@ -41,8 +41,8 @@ struct Strided3 {
 inline void validate_strided3_dims(const at::Tensor& tensor) {
   TORCH_CHECK(
       tensor.dim() >= 1 && tensor.dim() <= 3,
-      "Selective D-LinOSS expects parameters with 1, 2, or 3 dimensions; got "
-      << tensor.dim());
+      "Selective D-LinOSS expects parameters with 1, 2, or 3 dimensions; got ",
+      tensor.dim());
 }
 
 template <typename scalar_t>
@@ -80,20 +80,33 @@ inline Strided3<scalar_t> make_strided3(
   switch (tensor.dim()) {
     case 1: {
       const int64_t size_m = sizes[0];
-      TORCH_CHECK(check_size(size_m, ssm), "Expected size " << ssm << " or 1 along M axis but got " << size_m);
+      TORCH_CHECK(
+          check_size(size_m, ssm),
+          "Expected size ",
+          ssm,
+          " or 1 along M axis but got ",
+          size_m);
       assign_axis(2, size_m, strides[0]);
       break;
     }
     case 2: {
       const int64_t size0 = sizes[0];
       const int64_t size1 = sizes[1];
-      TORCH_CHECK(check_size(size1, ssm), "Expected size " << ssm << " or 1 along last axis but got " << size1);
+      TORCH_CHECK(
+          check_size(size1, ssm),
+          "Expected size ",
+          ssm,
+          " or 1 along last axis but got ",
+          size1);
       if (check_size(size0, length)) {
         assign_axis(0, size0, strides[0]);
       } else if (check_size(size0, batch)) {
         assign_axis(1, size0, strides[0]);
       } else {
-        TORCH_CHECK(false, "First dimension must match length or batch (or be 1), got " << size0);
+        TORCH_CHECK(
+            false,
+            "First dimension must match length or batch (or be 1), got ",
+            size0);
       }
       assign_axis(2, size1, strides[1]);
       break;
@@ -102,9 +115,24 @@ inline Strided3<scalar_t> make_strided3(
       const int64_t size_l = sizes[0];
       const int64_t size_b = sizes[1];
       const int64_t size_m = sizes[2];
-      TORCH_CHECK(check_size(size_l, length), "Expected size " << length << " or 1 along length axis but got " << size_l);
-      TORCH_CHECK(check_size(size_b, batch), "Expected size " << batch << " or 1 along batch axis but got " << size_b);
-      TORCH_CHECK(check_size(size_m, ssm), "Expected size " << ssm << " or 1 along state axis but got " << size_m);
+      TORCH_CHECK(
+          check_size(size_l, length),
+          "Expected size ",
+          length,
+          " or 1 along length axis but got ",
+          size_l);
+      TORCH_CHECK(
+          check_size(size_b, batch),
+          "Expected size ",
+          batch,
+          " or 1 along batch axis but got ",
+          size_b);
+      TORCH_CHECK(
+          check_size(size_m, ssm),
+          "Expected size ",
+          ssm,
+          " or 1 along state axis but got ",
+          size_m);
       assign_axis(0, size_l, strides[0]);
       assign_axis(1, size_b, strides[1]);
       assign_axis(2, size_m, strides[2]);
