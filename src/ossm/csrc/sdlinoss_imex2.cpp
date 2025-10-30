@@ -314,33 +314,36 @@ torch::Tensor sdlinoss_imex2_forward(const at::Tensor& A,
                                      const at::Tensor& G,
                                      const at::Tensor& step,
                                      const at::Tensor& bu) {
-  TORCH_CHECK(A.dim() == 3 && G.dim() == 3 && step.dim() == 3,
-              "A, G, and step must have shape (length, batch, ssm_size)");
   TORCH_CHECK(bu.dim() == 3, "bu must have shape (length, batch, ssm_size)");
+  TORCH_CHECK(A.device() == bu.device() && G.device() == bu.device() && step.device() == bu.device(),
+              "All tensors must live on the same device");
 
   const auto length = bu.size(0);
   const auto batch = bu.size(1);
   const auto ssm = bu.size(2);
-
-  TORCH_CHECK(A.sizes() == bu.sizes() && G.sizes() == bu.sizes() && step.sizes() == bu.sizes(),
-              "A, G, and step must match bu shape");
 
   auto output = at::empty({length, batch, ssm, 2}, bu.options());
   if (length == 0) {
     return output;
   }
 
-  TORCH_CHECK(A.is_contiguous() && G.is_contiguous() && step.is_contiguous(),
-              "A, G, and step must be contiguous");
-  TORCH_CHECK(bu.is_contiguous(), "bu must be contiguous");
-
   if (bu.is_cuda()) {
 #ifdef WITH_CUDA
+    validate_strided3_dims(A);
+    validate_strided3_dims(G);
+    validate_strided3_dims(step);
     sdlinoss_imex2_forward_cuda(A, G, step, bu, output);
 #else
     TORCH_CHECK(false, "sdlinoss_imex2 CUDA extension was not built");
 #endif
   } else {
+    TORCH_CHECK(A.dim() == 3 && G.dim() == 3 && step.dim() == 3,
+                "A, G, and step must have shape (length, batch, ssm_size)");
+    TORCH_CHECK(A.sizes() == bu.sizes() && G.sizes() == bu.sizes() && step.sizes() == bu.sizes(),
+                "A, G, and step must match bu shape");
+    TORCH_CHECK(A.is_contiguous() && G.is_contiguous() && step.is_contiguous(),
+                "A, G, and step must be contiguous");
+    TORCH_CHECK(bu.is_contiguous(), "bu must be contiguous");
     sdlinoss_imex2_forward_cpu(A, G, step, bu, output);
   }
 
@@ -365,18 +368,22 @@ std::vector<at::Tensor> sdlinoss_imex2_backward(const at::Tensor& A,
   auto grad_step = at::zeros_like(step);
   auto grad_bu = at::empty_like(bu);
 
-  TORCH_CHECK(A.is_contiguous() && G.is_contiguous() && step.is_contiguous(),
-              "A, G, and step must be contiguous");
-  TORCH_CHECK(bu.is_contiguous() && states.is_contiguous() && grad_output.is_contiguous(),
-              "bu, states, and grad_output must be contiguous");
-
   if (bu.is_cuda()) {
 #ifdef WITH_CUDA
+    validate_strided3_dims(A);
+    validate_strided3_dims(G);
+    validate_strided3_dims(step);
+    TORCH_CHECK(states.is_contiguous() && grad_output.is_contiguous(),
+                "states and grad_output must be contiguous on CUDA");
     sdlinoss_imex2_backward_cuda(A, G, step, bu, states, grad_output, grad_A, grad_G, grad_step, grad_bu);
 #else
     TORCH_CHECK(false, "sdlinoss_imex2 CUDA extension was not built");
 #endif
   } else {
+    TORCH_CHECK(A.is_contiguous() && G.is_contiguous() && step.is_contiguous(),
+                "A, G, and step must be contiguous");
+    TORCH_CHECK(bu.is_contiguous() && states.is_contiguous() && grad_output.is_contiguous(),
+                "bu, states, and grad_output must be contiguous");
     sdlinoss_imex2_backward_cpu(A, G, step, bu, states, grad_output, grad_A, grad_G, grad_step, grad_bu);
   }
 

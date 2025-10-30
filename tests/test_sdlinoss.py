@@ -9,6 +9,7 @@ import pytest
 import torch
 from torch import Tensor
 
+import ossm.models._sdlinoss_scan as _sdlinoss_scan
 from ossm.models.sdlinoss import SelectiveDLinOSSLayer, run_sdlinoss
 
 
@@ -104,6 +105,47 @@ def test_run_sdlinoss_broadcastability(shape_kind: str) -> None:
     y = run_sdlinoss("imex1", A, G, D, u)
     y_full = run_sdlinoss("imex1", A_full, G_full, dt, u)
     assert torch.allclose(y, y_full, atol=1e-6, rtol=1e-5)
+
+
+@pytest.mark.parametrize("shape_kind", ["M", "LM", "BM", "LBM"])
+def test_cuda_kernels_accept_broadcast_views(shape_kind: str) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    if not _sdlinoss_scan.has_kernels("imex1"):
+        pytest.skip("Selective D-LinOSS CUDA kernels unavailable")
+
+    seed_all(42)
+    device = torch.device("cuda")
+    L, B, M = 7, 3, 5
+
+    base = torch.rand(L, B, M, device=device)
+    A_full = base + 0.1
+    G_full = base * 0.5
+    dt_full = torch.sigmoid(torch.randn(L, B, M, device=device))
+
+    if shape_kind == "M":
+        A = A_full[0, 0]
+        G = G_full[0, 0]
+        D = dt_full[0, 0]
+    elif shape_kind == "LM":
+        A = A_full[:, 0]
+        G = G_full[:, 0]
+        D = dt_full[:, 0]
+    elif shape_kind == "BM":
+        A = A_full[0]
+        G = G_full[0]
+        D = dt_full[0]
+    else:
+        A, G, D = A_full, G_full, dt_full
+
+    bu_real = torch.randn(L, B, M, device=device)
+    bu_imag = torch.randn(L, B, M, device=device)
+    bu = torch.complex(bu_real, bu_imag)
+
+    out_kernel = run_sdlinoss("imex1", A, G, D, bu)
+    out_ref = _sdlinoss_scan._fallback_sdlinoss("imex1", A_full, G_full, dt_full, bu)
+
+    torch.testing.assert_close(out_kernel, out_ref, atol=1e-5, rtol=1e-5)
 
 
 def test_eigenvalue_magnitude_matches_r_and_contraction_law() -> None:
