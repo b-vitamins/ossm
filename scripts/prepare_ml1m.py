@@ -58,11 +58,13 @@ def _build_splits(
         if min_item_interactions > 1:
             item_counts = df["item_id"].value_counts()
             keep_items = set(item_counts[item_counts >= min_item_interactions].index)
-            df = df[df["item_id"].isin(keep_items)]
+            if keep_items:
+                df = df[df["item_id"].isin(keep_items)]
         if min_user_interactions > 1:
             user_counts = df["user_id"].value_counts()
             keep_users = set(user_counts[user_counts >= min_user_interactions].index)
-            df = df[df["user_id"].isin(keep_users)]
+            if keep_users:
+                df = df[df["user_id"].isin(keep_users)]
         changed = len(df) != before
 
     grouped = df.groupby("user_id", sort=False)
