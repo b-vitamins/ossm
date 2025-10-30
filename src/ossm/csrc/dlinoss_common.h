@@ -53,6 +53,19 @@ inline Strided3<scalar_t> make_strided3(
   Strided3<scalar_t> result;
   result.p = tensor.data_ptr<scalar_t>();
 
+  const int64_t total_size = length * batch * ssm;
+  const int64_t storage_offset = tensor.storage_offset();
+  const int64_t storage_size = tensor.storage().size();
+  if (tensor.dim() <= 2 && storage_offset == 0 && storage_size >= total_size) {
+    result.nL = length;
+    result.sL = batch > 0 ? batch * ssm : 0;
+    result.nB = batch;
+    result.sB = ssm;
+    result.nM = ssm;
+    result.sM = 1;
+    return result;
+  }
+
   const auto sizes = tensor.sizes();
   const auto strides = tensor.strides();
 

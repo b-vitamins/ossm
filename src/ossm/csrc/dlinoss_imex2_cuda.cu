@@ -1,3 +1,4 @@
+#include <ATen/AccumulateType.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/Exceptions.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -77,14 +78,15 @@ __global__ void dlinoss_imex2_backward_kernel(const typename scalar_t::value_typ
                                               int64_t batch,
                                               int64_t ssm) {
   using value_t = typename scalar_t::value_type;
+  using acc_t = at::acc_type<value_t, true>;
 
   const int64_t series = batch * ssm;
   const int64_t step_stride = series * 2;
 
-  extern __shared__ __align__(sizeof(value_t)) unsigned char shared_buffer[];
-  value_t* shared_grad_alpha = reinterpret_cast<value_t*>(shared_buffer);
-  value_t* shared_grad_gamma = shared_grad_alpha + blockDim.x;
-  value_t* shared_grad_sigma = shared_grad_gamma + blockDim.x;
+  extern __shared__ __align__(sizeof(acc_t)) unsigned char shared_buffer[];
+  acc_t* shared_grad_alpha = reinterpret_cast<acc_t*>(shared_buffer);
+  acc_t* shared_grad_gamma = shared_grad_alpha + blockDim.x;
+  acc_t* shared_grad_sigma = shared_grad_gamma + blockDim.x;
 
   for (int64_t state = blockIdx.x; state < ssm; state += gridDim.x) {
     const value_t alpha = a_diag[state];
@@ -101,9 +103,9 @@ __global__ void dlinoss_imex2_backward_kernel(const typename scalar_t::value_typ
     const value_t d_sigma_prev1 = -value_t(2) * sigma * alpha;
     const value_t d_sigma_bu = value_t(2) * sigma;
 
-    value_t grad_alpha_local = value_t(0);
-    value_t grad_gamma_local = value_t(0);
-    value_t grad_sigma_local = value_t(0);
+    acc_t grad_alpha_local = acc_t(0);
+    acc_t grad_gamma_local = acc_t(0);
+    acc_t grad_sigma_local = acc_t(0);
 
     for (int64_t batch_idx = threadIdx.x; batch_idx < batch; batch_idx += blockDim.x) {
       const int64_t series_idx = batch_idx * ssm + state;
@@ -146,21 +148,38 @@ __global__ void dlinoss_imex2_backward_kernel(const typename scalar_t::value_typ
         const value_t grad_new0_real = grad_state0_real;
         const value_t grad_new0_imag = grad_state0_imag;
 
-        grad_alpha_local += (-sigma) * (grad_new0_real * prev1_real + grad_new0_imag * prev1_imag);
-        grad_alpha_local += (-sigma_sq) * (grad_new1_real * prev1_real + grad_new1_imag * prev1_imag);
+        const acc_t grad_new0_real_acc = static_cast<acc_t>(grad_new0_real);
+        const acc_t grad_new0_imag_acc = static_cast<acc_t>(grad_new0_imag);
+        const acc_t grad_new1_real_acc = static_cast<acc_t>(grad_new1_real);
+        const acc_t grad_new1_imag_acc = static_cast<acc_t>(grad_new1_imag);
+        const acc_t prev0_real_acc = static_cast<acc_t>(prev0_real);
+        const acc_t prev0_imag_acc = static_cast<acc_t>(prev0_imag);
+        const acc_t prev1_real_acc = static_cast<acc_t>(prev1_real);
+        const acc_t prev1_imag_acc = static_cast<acc_t>(prev1_imag);
+        const acc_t sigma_acc = static_cast<acc_t>(sigma);
+        const acc_t sigma_sq_acc = static_cast<acc_t>(sigma_sq);
 
-        grad_gamma_local += (-sigma) * (grad_new0_real * prev0_real + grad_new0_imag * prev0_imag);
-        grad_gamma_local += (-sigma_sq) * (grad_new1_real * prev0_real + grad_new1_imag * prev0_imag);
+        grad_alpha_local +=
+            -sigma_acc * (grad_new0_real_acc * prev1_real_acc + grad_new0_imag_acc * prev1_imag_acc);
+        grad_alpha_local +=
+            -sigma_sq_acc * (grad_new1_real_acc * prev1_real_acc + grad_new1_imag_acc * prev1_imag_acc);
+
+        grad_gamma_local +=
+            -sigma_acc * (grad_new0_real_acc * prev0_real_acc + grad_new0_imag_acc * prev0_imag_acc);
+        grad_gamma_local +=
+            -sigma_sq_acc * (grad_new1_real_acc * prev0_real_acc + grad_new1_imag_acc * prev0_imag_acc);
 
         const value_t sigma_term_real = prev0_real * (-gamma) + prev1_real * (-alpha) + bu_real;
         const value_t sigma_term_imag = prev0_imag * (-gamma) + prev1_imag * (-alpha) + bu_imag;
-        grad_sigma_local += grad_new0_real * sigma_term_real + grad_new0_imag * sigma_term_imag;
+        grad_sigma_local += grad_new0_real_acc * static_cast<acc_t>(sigma_term_real) +
+                            grad_new0_imag_acc * static_cast<acc_t>(sigma_term_imag);
 
         const value_t sigma_grad_term_real =
             prev0_real * d_sigma_prev0 + prev1_real * d_sigma_prev1 + bu_real * d_sigma_bu;
         const value_t sigma_grad_term_imag =
             prev0_imag * d_sigma_prev0 + prev1_imag * d_sigma_prev1 + bu_imag * d_sigma_bu;
-        grad_sigma_local += grad_new1_real * sigma_grad_term_real + grad_new1_imag * sigma_grad_term_imag;
+        grad_sigma_local += grad_new1_real_acc * static_cast<acc_t>(sigma_grad_term_real) +
+                            grad_new1_imag_acc * static_cast<acc_t>(sigma_grad_term_imag);
 
         const value_t grad_bu_real = grad_new0_real * sigma + grad_new1_real * sigma_sq;
         const value_t grad_bu_imag = grad_new0_imag * sigma + grad_new1_imag * sigma_sq;
@@ -200,9 +219,9 @@ __global__ void dlinoss_imex2_backward_kernel(const typename scalar_t::value_typ
     }
 
     if (threadIdx.x == 0) {
-      grad_a_ptr[state] = shared_grad_alpha[0];
-      grad_g_ptr[state] = shared_grad_gamma[0];
-      grad_step_ptr[state] = shared_grad_sigma[0];
+      grad_a_ptr[state] = static_cast<value_t>(shared_grad_alpha[0]);
+      grad_g_ptr[state] = static_cast<value_t>(shared_grad_gamma[0]);
+      grad_step_ptr[state] = static_cast<value_t>(shared_grad_sigma[0]);
     }
 
     __syncthreads();
@@ -270,7 +289,9 @@ void dlinoss_imex2_backward_cuda(const at::Tensor& a_diag,
   grad_step.zero_();
 
   AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "dlinoss_imex2_backward_cuda", [&] {
-    const size_t shared_mem_size = static_cast<size_t>(threads) * 3 * sizeof(typename scalar_t::value_type);
+    using value_t = typename scalar_t::value_type;
+    using acc_t = at::acc_type<value_t, true>;
+    const size_t shared_mem_size = static_cast<size_t>(threads) * 3 * sizeof(acc_t);
     dlinoss_imex2_backward_kernel<scalar_t><<<blocks, threads, shared_mem_size, at::cuda::getCurrentCUDAStream()>>>(
         a_diag.data_ptr<typename scalar_t::value_type>(),
         g_diag.data_ptr<typename scalar_t::value_type>(),
