@@ -56,7 +56,9 @@ inline Strided3<scalar_t> make_strided3(
   const int64_t total_size = length * batch * ssm;
   const int64_t storage_offset = tensor.storage_offset();
   const int64_t storage_size = tensor.storage().size();
-  if (tensor.dim() <= 2 && storage_offset == 0 && storage_size >= total_size) {
+  const bool shares_full_storage =
+      tensor.dim() <= 2 && storage_offset == 0 && storage_size >= total_size;
+  if (shares_full_storage && tensor.numel() == total_size) {
     result.nL = length;
     result.sL = batch > 0 ? batch * ssm : 0;
     result.nB = batch;
