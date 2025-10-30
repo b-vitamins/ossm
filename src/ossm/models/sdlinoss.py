@@ -214,7 +214,7 @@ class SelectiveDLinOSSLayer(nn.Module):
             B, L, self.ssm_size
         )
 
-        if self.inj_head is not None:
+        if self.inj_head is not None and self.inj_logit is not None:
             base = self.inj_logit.view(1, 1, -1).to(feats)
             gate = torch.sigmoid(base + self.inj_head(feats)).to(dtype=scan_real_dtype)
             bu = bu * gate.to(dtype=bu.dtype)
