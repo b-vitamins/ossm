@@ -11,6 +11,98 @@ namespace {
 constexpr double kDtMin = 1e-6;
 constexpr double kDtMax = 1.0;
 
+at::Tensor normalize_param_view_cpu(
+    const at::Tensor& param,
+    const char* name,
+    int64_t length,
+    int64_t batch,
+    int64_t ssm) {
+  TORCH_CHECK(
+      param.dim() >= 1 && param.dim() <= 3,
+      name,
+      " must be shaped as (M,), (L,M), (B,M), or (L,B,M); got ",
+      param.sizes());
+
+  if (param.dim() == 1) {
+    TORCH_CHECK(
+        param.size(0) == ssm,
+        name,
+        " must have size ",
+        ssm,
+        " along the last dimension; got ",
+        param.sizes());
+    return param.unsqueeze(0).unsqueeze(0);
+  }
+
+  if (param.dim() == 2) {
+    TORCH_CHECK(
+        param.size(1) == ssm,
+        name,
+        " must have size ",
+        ssm,
+        " along the last dimension; got ",
+        param.sizes());
+    if (param.size(0) == length) {
+      return param.unsqueeze(1);
+    }
+    if (param.size(0) == batch) {
+      return param.unsqueeze(0);
+    }
+  }
+
+  if (param.dim() == 3) {
+    TORCH_CHECK(
+        param.size(2) == ssm,
+        name,
+        " must have size ",
+        ssm,
+        " along the last dimension; got ",
+        param.sizes());
+    const bool length_ok = param.size(0) == length || param.size(0) == 1;
+    const bool batch_ok = param.size(1) == batch || param.size(1) == 1;
+    TORCH_CHECK(
+        length_ok && batch_ok,
+        name,
+        " must have shape (L,B,M) with optional singleton L/B axes; got ",
+        param.sizes());
+    return param;
+  }
+
+  TORCH_CHECK(
+      false,
+      name,
+      " must be shaped as (M,), (L,M), (B,M), or (L,B,M); got ",
+      param.sizes());
+}
+
+at::Tensor materialize_param_cpu(
+    const at::Tensor& param_view, int64_t length, int64_t batch, int64_t ssm) {
+  const bool matches_length = param_view.size(0) == length;
+  const bool matches_batch = param_view.size(1) == batch;
+  const bool matches_ssm = param_view.size(2) == ssm;
+
+  if (matches_length && matches_batch && matches_ssm) {
+    return param_view.is_contiguous() ? param_view : param_view.contiguous();
+  }
+
+  return param_view.expand({length, batch, ssm}).contiguous();
+}
+
+at::Tensor reduce_broadcast_grad(
+    const at::Tensor& grad_buffer,
+    const at::Tensor& param_view,
+    int64_t length,
+    int64_t batch) {
+  at::Tensor grad = grad_buffer;
+  if (param_view.size(0) == 1 && length > 1) {
+    grad = grad.sum(0, /*keepdim=*/true);
+  }
+  if (param_view.size(1) == 1 && batch > 1) {
+    grad = grad.sum(1, /*keepdim=*/true);
+  }
+  return grad;
+}
+
 template <typename scalar_t>
 inline typename ComplexTraits<scalar_t>::value_t clamp_step(
     typename ComplexTraits<scalar_t>::value_t raw) {
@@ -308,14 +400,14 @@ torch::Tensor sdlinoss_ex_forward(const at::Tensor& A,
     TORCH_CHECK(false, "sdlinoss_ex CUDA extension was not built");
 #endif
   } else {
-    TORCH_CHECK(A.dim() == 3 && G.dim() == 3 && step.dim() == 3,
-                "A, G, and step must have shape (length, batch, ssm_size)");
-    TORCH_CHECK(A.sizes() == bu.sizes() && G.sizes() == bu.sizes() && step.sizes() == bu.sizes(),
-                "A, G, and step must match bu shape");
-    TORCH_CHECK(A.is_contiguous() && G.is_contiguous() && step.is_contiguous(),
-                "A, G, and step must be contiguous");
     TORCH_CHECK(bu.is_contiguous(), "bu must be contiguous");
-    sdlinoss_ex_forward_cpu(A, G, step, bu, output);
+    const auto A_view = normalize_param_view_cpu(A, "A", length, batch, ssm);
+    const auto G_view = normalize_param_view_cpu(G, "G", length, batch, ssm);
+    const auto step_view = normalize_param_view_cpu(step, "step", length, batch, ssm);
+    const auto A_broadcast = materialize_param_cpu(A_view, length, batch, ssm);
+    const auto G_broadcast = materialize_param_cpu(G_view, length, batch, ssm);
+    const auto step_broadcast = materialize_param_cpu(step_view, length, batch, ssm);
+    sdlinoss_ex_forward_cpu(A_broadcast, G_broadcast, step_broadcast, bu, output);
   }
 
   return output;
@@ -330,14 +422,20 @@ std::vector<at::Tensor> sdlinoss_ex_backward(const at::Tensor& A,
   TORCH_CHECK(states.dim() == 4 && states.size(3) == 2,
               "states must have shape (length, batch, ssm_size, 2)");
   TORCH_CHECK(bu.dim() == 3, "bu must have shape (length, batch, ssm_size)");
-  TORCH_CHECK(A.sizes() == bu.sizes() && G.sizes() == bu.sizes() && step.sizes() == bu.sizes(),
-              "A, G, and step must match bu shape");
   TORCH_CHECK(grad_output.sizes() == bu.sizes(), "grad_output must match bu shape");
 
-  auto grad_A = at::zeros_like(A);
-  auto grad_G = at::zeros_like(G);
-  auto grad_step = at::zeros_like(step);
-  auto grad_bu = at::empty_like(bu);
+  const auto length = bu.size(0);
+  const auto batch = bu.size(1);
+  const auto ssm = bu.size(2);
+
+  TORCH_CHECK(
+      A.device() == bu.device() && G.device() == bu.device() && step.device() == bu.device(),
+      "All tensors must live on the same device");
+
+  at::Tensor grad_A;
+  at::Tensor grad_G;
+  at::Tensor grad_step;
+  at::Tensor grad_bu;
 
   if (bu.is_cuda()) {
 #ifdef WITH_CUDA
@@ -346,16 +444,44 @@ std::vector<at::Tensor> sdlinoss_ex_backward(const at::Tensor& A,
     validate_strided3_dims(step);
     TORCH_CHECK(states.is_contiguous() && grad_output.is_contiguous(),
                 "states and grad_output must be contiguous on CUDA");
+    grad_A = at::zeros_like(A);
+    grad_G = at::zeros_like(G);
+    grad_step = at::zeros_like(step);
+    grad_bu = at::empty_like(bu);
     sdlinoss_ex_backward_cuda(A, G, step, bu, states, grad_output, grad_A, grad_G, grad_step, grad_bu);
 #else
     TORCH_CHECK(false, "sdlinoss_ex CUDA extension was not built");
 #endif
   } else {
-    TORCH_CHECK(A.is_contiguous() && G.is_contiguous() && step.is_contiguous(),
-                "A, G, and step must be contiguous");
     TORCH_CHECK(bu.is_contiguous() && states.is_contiguous() && grad_output.is_contiguous(),
                 "bu, states, and grad_output must be contiguous");
-    sdlinoss_ex_backward_cpu(A, G, step, bu, states, grad_output, grad_A, grad_G, grad_step, grad_bu);
+    const auto A_view = normalize_param_view_cpu(A, "A", length, batch, ssm);
+    const auto G_view = normalize_param_view_cpu(G, "G", length, batch, ssm);
+    const auto step_view = normalize_param_view_cpu(step, "step", length, batch, ssm);
+
+    const auto A_broadcast = materialize_param_cpu(A_view, length, batch, ssm);
+    const auto G_broadcast = materialize_param_cpu(G_view, length, batch, ssm);
+    const auto step_broadcast = materialize_param_cpu(step_view, length, batch, ssm);
+
+    auto grad_A_buffer = at::zeros({length, batch, ssm}, A.options());
+    auto grad_G_buffer = at::zeros({length, batch, ssm}, G.options());
+    auto grad_step_buffer = at::zeros({length, batch, ssm}, step.options());
+    grad_bu = at::empty_like(bu);
+
+    sdlinoss_ex_backward_cpu(A_broadcast,
+                             G_broadcast,
+                             step_broadcast,
+                             bu,
+                             states,
+                             grad_output,
+                             grad_A_buffer,
+                             grad_G_buffer,
+                             grad_step_buffer,
+                             grad_bu);
+
+    grad_A = reduce_broadcast_grad(grad_A_buffer, A_view, length, batch).reshape(A.sizes());
+    grad_G = reduce_broadcast_grad(grad_G_buffer, G_view, length, batch).reshape(G.sizes());
+    grad_step = reduce_broadcast_grad(grad_step_buffer, step_view, length, batch).reshape(step.sizes());
   }
 
   return {grad_A, grad_G, grad_step, grad_bu};
