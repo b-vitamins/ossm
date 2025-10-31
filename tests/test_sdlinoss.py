@@ -33,23 +33,24 @@ def build_M_F_imex1(A: Tensor, G: Tensor, dt: Tensor) -> Tuple[Tuple[Tensor, Ten
     S = 1.0 + dt * G
     Sinv = 1.0 / torch.clamp(S, min=1e-6)
     M11 = 1.0 - (dt * dt) * Sinv * A
-    M12 = dt * Sinv
-    M21 = -dt * Sinv * A
+    M12 = Sinv
+    M21 = -(dt * dt) * Sinv * A
     M22 = Sinv
     F1 = (dt * dt) * Sinv
-    F2 = dt * Sinv
+    F2 = F1
     return (M11, M12, M21, M22), (F1, F2)
 
 
 def naive_rollout_imex1(A: Tensor, G: Tensor, dt: Tensor, u: Tensor) -> Tensor:
     L, B, M = u.shape
-    z = torch.zeros(B, M, dtype=u.dtype, device=u.device)
+    w = torch.zeros(B, M, dtype=u.dtype, device=u.device)
     x = torch.zeros(B, M, dtype=u.dtype, device=u.device)
     xs = []
     for t in range(L):
         S = 1.0 + dt[t] * G[t]
-        z = (z + dt[t] * (-A[t] * x + u[t])) / torch.clamp(S, min=1e-6)
-        x = x + dt[t] * z
+        comb = -A[t] * x + u[t]
+        w = (w + (dt[t] * dt[t]) * comb) / torch.clamp(S, min=1e-6)
+        x = x + w
         xs.append(x)
     return torch.stack(xs, dim=0)
 
@@ -107,21 +108,22 @@ def test_run_sdlinoss_broadcastability(shape_kind: str) -> None:
     assert torch.allclose(y, y_full, atol=1e-6, rtol=1e-5)
 
 
+@pytest.mark.parametrize("variant", ["imex1", "imex2"])
 @pytest.mark.parametrize("shape_kind", ["M", "LM", "BM", "LBM"])
-def test_cuda_kernels_accept_broadcast_views(shape_kind: str) -> None:
+def test_cuda_kernels_accept_broadcast_views(shape_kind: str, variant: str) -> None:
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    if not _sdlinoss_scan.has_kernels("imex1"):
+    if not _sdlinoss_scan.has_kernels(variant):
         pytest.skip("Selective D-LinOSS CUDA kernels unavailable")
 
     seed_all(42)
     device = torch.device("cuda")
     L, B, M = 7, 3, 5
 
-    base = torch.rand(L, B, M, device=device)
-    A_full = base + 0.1
-    G_full = base * 0.5
-    dt_full = torch.sigmoid(torch.randn(L, B, M, device=device))
+    r = torch.rand(L, B, M, device=device) * 0.7 + 0.2
+    theta = (torch.rand(L, B, M, device=device) * 2 - 1) * math.pi
+    dt_full = torch.sigmoid(torch.randn(L, B, M, device=device)) * 0.9 + 0.05
+    A_full, G_full = make_stable_AG_from_rt(r, theta, dt_full)
 
     if shape_kind == "M":
         A = A_full[0, 0]
@@ -142,10 +144,47 @@ def test_cuda_kernels_accept_broadcast_views(shape_kind: str) -> None:
     bu_imag = torch.randn(L, B, M, device=device)
     bu = torch.complex(bu_real, bu_imag)
 
-    out_kernel = run_sdlinoss("imex1", A, G, D, bu)
-    out_ref = _sdlinoss_scan._fallback_sdlinoss("imex1", A_full, G_full, dt_full, bu)
+    out_kernel = run_sdlinoss(variant, A, G, D, bu)
+    out_ref = _sdlinoss_scan._fallback_sdlinoss(variant, A_full, G_full, dt_full, bu)
 
     torch.testing.assert_close(out_kernel, out_ref, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("variant", ["imex1", "imex2", "im", "ex"])
+@pytest.mark.parametrize("shape_kind", ["M", "LM", "BM", "LBM"])
+def test_cpu_kernels_accept_broadcast_views(shape_kind: str, variant: str) -> None:
+    seed_all(4242)
+    device = torch.device("cpu")
+    L, B, M = 7, 3, 5
+
+    r = torch.rand(L, B, M, device=device) * 0.7 + 0.2
+    theta = (torch.rand(L, B, M, device=device) * 2 - 1) * math.pi
+    dt_full = torch.sigmoid(torch.randn(L, B, M, device=device)) * 0.9 + 0.05
+    A_full, G_full = make_stable_AG_from_rt(r, theta, dt_full)
+
+    if shape_kind == "M":
+        A = A_full[0, 0]
+        G = G_full[0, 0]
+        D = dt_full[0, 0]
+    elif shape_kind == "LM":
+        A = A_full[:, 0]
+        G = G_full[:, 0]
+        D = dt_full[:, 0]
+    elif shape_kind == "BM":
+        A = A_full[0]
+        G = G_full[0]
+        D = dt_full[0]
+    else:
+        A, G, D = A_full, G_full, dt_full
+
+    bu_real = torch.randn(L, B, M, device=device)
+    bu_imag = torch.randn(L, B, M, device=device)
+    bu = torch.complex(bu_real, bu_imag)
+
+    out_kernel = run_sdlinoss(variant, A, G, D, bu)
+    out_ref = _sdlinoss_scan._fallback_sdlinoss(variant, A, G, D, bu)
+
+    torch.testing.assert_close(out_kernel, out_ref, atol=1e-6, rtol=1e-6)
 
 
 def test_eigenvalue_magnitude_matches_r_and_contraction_law() -> None:

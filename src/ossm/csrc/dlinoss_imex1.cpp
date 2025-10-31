@@ -26,10 +26,8 @@ void dlinoss_imex1_forward_cpu_kernel(const typename ComplexTraits<scalar_t>::va
   const int64_t step_stride = series * 2;
 
   std::vector<value_t> inv(ssm);
-  std::vector<value_t> sigma_inv(ssm);
   std::vector<value_t> sigma2_inv(ssm);
   std::vector<value_t> coeff12(ssm);
-  std::vector<value_t> coeff22(ssm);
 
   for (int64_t state = 0; state < ssm; ++state) {
     const value_t alpha = a_diag[state];
@@ -38,23 +36,23 @@ void dlinoss_imex1_forward_cpu_kernel(const typename ComplexTraits<scalar_t>::va
 
     const value_t denom = value_t(1) + sigma * gamma;
     const value_t inv_val = value_t(1) / denom;
-    const value_t sigma_inv_val = sigma * inv_val;
     const value_t sigma2_inv_val = sigma * sigma * inv_val;
 
     inv[state] = inv_val;
-    sigma_inv[state] = sigma_inv_val;
     sigma2_inv[state] = sigma2_inv_val;
-    coeff12[state] = -alpha * sigma_inv_val;
-    coeff22[state] = value_t(1) - alpha * sigma2_inv_val;
+    // Store the coupling coefficient for x_k -> w_{k+1}.  The implementation
+    // evolves the scaled auxiliary state w = dt * z used in the conditioning
+    // analysis.  It produces the same x trajectory as the official D-LinOSS
+    // recurrence, which keeps z explicitly, because x_{k+1} = x_k + w_{k+1} and
+    // w_{k+1} = dt * z_{k+1}.
+    coeff12[state] = -alpha * sigma2_inv_val;
   }
 
   at::parallel_for(0, ssm, 1, [&](int64_t begin, int64_t end) {
     for (int64_t state = begin; state < end; ++state) {
       const value_t inv_val = inv[state];
-      const value_t sigma_inv_val = sigma_inv[state];
       const value_t sigma2_inv_val = sigma2_inv[state];
       const value_t coeff12_val = coeff12[state];
-      const value_t coeff22_val = coeff22[state];
 
       for (int64_t batch_idx = 0; batch_idx < batch; ++batch_idx) {
         const int64_t series_idx = batch_idx * ssm + state;
@@ -72,10 +70,12 @@ void dlinoss_imex1_forward_cpu_kernel(const typename ComplexTraits<scalar_t>::va
           const value_t bu_real = bu_val.real();
           const value_t bu_imag = bu_val.imag();
 
-          const value_t new0_real = state0_real * inv_val + state1_real * coeff12_val + bu_real * sigma_inv_val;
-          const value_t new0_imag = state0_imag * inv_val + state1_imag * coeff12_val + bu_imag * sigma_inv_val;
-          const value_t new1_real = state0_real * sigma_inv_val + state1_real * coeff22_val + bu_real * sigma2_inv_val;
-          const value_t new1_imag = state0_imag * sigma_inv_val + state1_imag * coeff22_val + bu_imag * sigma2_inv_val;
+          const value_t bu_scale_real = bu_real * sigma2_inv_val;
+          const value_t bu_scale_imag = bu_imag * sigma2_inv_val;
+          const value_t new0_real = state0_real * inv_val + state1_real * coeff12_val + bu_scale_real;
+          const value_t new0_imag = state0_imag * inv_val + state1_imag * coeff12_val + bu_scale_imag;
+          const value_t new1_real = new0_real + state1_real;
+          const value_t new1_imag = new0_imag + state1_imag;
 
           out_series[0] = scalar_t(new0_real, new0_imag);
           out_series[1] = scalar_t(new1_real, new1_imag);
@@ -114,10 +114,8 @@ void dlinoss_imex1_backward_cpu_kernel(const typename ComplexTraits<scalar_t>::v
   const int64_t step_stride = series * 2;
 
   std::vector<value_t> inv(ssm);
-  std::vector<value_t> sigma_inv(ssm);
   std::vector<value_t> sigma2_inv(ssm);
   std::vector<value_t> coeff12(ssm);
-  std::vector<value_t> coeff22(ssm);
 
   for (int64_t state = 0; state < ssm; ++state) {
     const value_t alpha = a_diag[state];
@@ -126,14 +124,11 @@ void dlinoss_imex1_backward_cpu_kernel(const typename ComplexTraits<scalar_t>::v
 
     const value_t denom = value_t(1) + sigma * gamma;
     const value_t inv_val = value_t(1) / denom;
-    const value_t sigma_inv_val = sigma * inv_val;
     const value_t sigma2_inv_val = sigma * sigma * inv_val;
 
     inv[state] = inv_val;
-    sigma_inv[state] = sigma_inv_val;
     sigma2_inv[state] = sigma2_inv_val;
-    coeff12[state] = -alpha * sigma_inv_val;
-    coeff22[state] = value_t(1) - alpha * sigma2_inv_val;
+    coeff12[state] = -alpha * sigma2_inv_val;
   }
 
   at::parallel_for(0, ssm, 1, [&](int64_t begin, int64_t end) {
@@ -142,13 +137,10 @@ void dlinoss_imex1_backward_cpu_kernel(const typename ComplexTraits<scalar_t>::v
       const value_t gamma = g_diag[state];
       const value_t sigma = step[state];
       const value_t inv_val = inv[state];
-      const value_t sigma_inv_val = sigma_inv[state];
       const value_t sigma2_inv_val = sigma2_inv[state];
       const value_t coeff12_val = coeff12[state];
-      const value_t coeff22_val = coeff22[state];
 
       value_t grad_alpha_state = value_t(0);
-      value_t grad_sigma_inv_state = value_t(0);
       value_t grad_sigma2_inv_state = value_t(0);
       value_t grad_inv_state = value_t(0);
 
@@ -189,28 +181,25 @@ void dlinoss_imex1_backward_cpu_kernel(const typename ComplexTraits<scalar_t>::v
           const value_t grad_new0_real = grad_state0_real;
           const value_t grad_new0_imag = grad_state0_imag;
 
-          const value_t neg_alpha_prev1_real = -alpha * prev1_real;
-          const value_t neg_alpha_prev1_imag = -alpha * prev1_imag;
-          const value_t bu_combined_real = neg_alpha_prev1_real + bu_real;
-          const value_t bu_combined_imag = neg_alpha_prev1_imag + bu_imag;
+          const value_t grad_total_real = grad_new0_real + grad_new1_real;
+          const value_t grad_total_imag = grad_new0_imag + grad_new1_imag;
 
-          grad_sigma_inv_state += grad_new0_real * bu_combined_real + grad_new0_imag * bu_combined_imag;
-          grad_sigma_inv_state += grad_new1_real * prev0_real + grad_new1_imag * prev0_imag;
-          grad_sigma2_inv_state += grad_new1_real * bu_combined_real + grad_new1_imag * bu_combined_imag;
-          grad_alpha_state += grad_new0_real * (-sigma_inv_val * prev1_real) +
-                              grad_new0_imag * (-sigma_inv_val * prev1_imag);
-          grad_alpha_state += grad_new1_real * (-sigma2_inv_val * prev1_real) +
-                              grad_new1_imag * (-sigma2_inv_val * prev1_imag);
-          grad_inv_state += grad_new0_real * prev0_real + grad_new0_imag * prev0_imag;
+          const value_t comb_real = bu_real - alpha * prev1_real;
+          const value_t comb_imag = bu_imag - alpha * prev1_imag;
 
-          const value_t grad_bu_real = grad_new0_real * sigma_inv_val + grad_new1_real * sigma2_inv_val;
-          const value_t grad_bu_imag = grad_new0_imag * sigma_inv_val + grad_new1_imag * sigma2_inv_val;
+          grad_sigma2_inv_state += grad_total_real * comb_real + grad_total_imag * comb_imag;
+          grad_alpha_state += grad_total_real * (-sigma2_inv_val * prev1_real) +
+                              grad_total_imag * (-sigma2_inv_val * prev1_imag);
+          grad_inv_state += grad_total_real * prev0_real + grad_total_imag * prev0_imag;
+
+          const value_t grad_bu_real = grad_total_real * sigma2_inv_val;
+          const value_t grad_bu_imag = grad_total_imag * sigma2_inv_val;
           *grad_bu_series = scalar_t(grad_bu_real, grad_bu_imag);
 
-          const value_t grad_prev0_real = grad_new0_real * inv_val + grad_new1_real * sigma_inv_val;
-          const value_t grad_prev0_imag = grad_new0_imag * inv_val + grad_new1_imag * sigma_inv_val;
-          const value_t grad_prev1_real = grad_new0_real * coeff12_val + grad_new1_real * coeff22_val;
-          const value_t grad_prev1_imag = grad_new0_imag * coeff12_val + grad_new1_imag * coeff22_val;
+          const value_t grad_prev0_real = grad_total_real * inv_val;
+          const value_t grad_prev0_imag = grad_total_imag * inv_val;
+          const value_t grad_prev1_real = grad_new1_real + grad_total_real * coeff12_val;
+          const value_t grad_prev1_imag = grad_new1_imag + grad_total_imag * coeff12_val;
 
           grad_state0_real = grad_prev0_real;
           grad_state0_imag = grad_prev0_imag;
@@ -227,16 +216,19 @@ void dlinoss_imex1_backward_cpu_kernel(const typename ComplexTraits<scalar_t>::v
         }
       }
 
-      value_t grad_sigma_state = grad_sigma_inv_state * inv_val;
-      value_t grad_inv_total = grad_inv_state + grad_sigma_inv_state * sigma;
-
-      const value_t grad_sigma_sq = grad_sigma2_inv_state * inv_val;
-      grad_inv_total += grad_sigma2_inv_state * sigma * sigma;
-      grad_sigma_state += grad_sigma_sq * value_t(2) * sigma;
+      const value_t sigma_sq = sigma * sigma;
+      const value_t grad_inv_total = grad_inv_state + grad_sigma2_inv_state * sigma_sq;
 
       const value_t inv_sq = inv_val * inv_val;
-      grad_sigma_state += grad_inv_total * (-gamma) * inv_sq;
-      const value_t grad_gamma_state = grad_inv_total * (-sigma) * inv_sq;
+      const value_t d_inv_d_sigma = -gamma * inv_sq;
+      const value_t d_inv_d_gamma = -sigma * inv_sq;
+      const value_t d_sigma2_inv_d_sigma = value_t(2) * sigma * inv_val + sigma_sq * d_inv_d_sigma;
+      const value_t d_sigma2_inv_d_gamma = sigma_sq * d_inv_d_gamma;
+
+      const value_t grad_sigma_state = grad_sigma2_inv_state * d_sigma2_inv_d_sigma +
+                                       grad_inv_total * d_inv_d_sigma;
+      const value_t grad_gamma_state = grad_sigma2_inv_state * d_sigma2_inv_d_gamma +
+                                       grad_inv_total * d_inv_d_gamma;
 
       grad_a_ptr[state] = grad_alpha_state;
       grad_step_ptr[state] = grad_sigma_state;
