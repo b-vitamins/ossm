@@ -25,34 +25,16 @@ void dlinoss_imex1_forward_cpu_kernel(const typename ComplexTraits<scalar_t>::va
   const int64_t series = batch * ssm;
   const int64_t step_stride = series * 2;
 
-  std::vector<value_t> inv(ssm);
-  std::vector<value_t> sigma2_inv(ssm);
-  std::vector<value_t> coeff12(ssm);
-
-  for (int64_t state = 0; state < ssm; ++state) {
-    const value_t alpha = a_diag[state];
-    const value_t gamma = g_diag[state];
-    const value_t sigma = step[state];
-
-    const value_t denom = value_t(1) + sigma * gamma;
-    const value_t inv_val = value_t(1) / denom;
-    const value_t sigma2_inv_val = sigma * sigma * inv_val;
-
-    inv[state] = inv_val;
-    sigma2_inv[state] = sigma2_inv_val;
-    // Store the coupling coefficient for x_k -> w_{k+1}.  The implementation
-    // evolves the scaled auxiliary state w = dt * z used in the conditioning
-    // analysis.  It produces the same x trajectory as the official D-LinOSS
-    // recurrence, which keeps z explicitly, because x_{k+1} = x_k + w_{k+1} and
-    // w_{k+1} = dt * z_{k+1}.
-    coeff12[state] = -alpha * sigma2_inv_val;
-  }
-
   at::parallel_for(0, ssm, 1, [&](int64_t begin, int64_t end) {
     for (int64_t state = begin; state < end; ++state) {
-      const value_t inv_val = inv[state];
-      const value_t sigma2_inv_val = sigma2_inv[state];
-      const value_t coeff12_val = coeff12[state];
+      const value_t alpha = a_diag[state];
+      const value_t gamma = g_diag[state];
+      const value_t sigma = step[state];
+      const value_t sigma_sq = sigma * sigma;
+      const value_t denom = value_t(1) + sigma * gamma;
+      const value_t inv_val = value_t(1) / denom;
+      const value_t sigma2_inv_val = sigma_sq * inv_val;
+      const value_t coeff12_val = -alpha * sigma2_inv_val;
 
       for (int64_t batch_idx = 0; batch_idx < batch; ++batch_idx) {
         const int64_t series_idx = batch_idx * ssm + state;
@@ -113,32 +95,16 @@ void dlinoss_imex1_backward_cpu_kernel(const typename ComplexTraits<scalar_t>::v
   const int64_t series = batch * ssm;
   const int64_t step_stride = series * 2;
 
-  std::vector<value_t> inv(ssm);
-  std::vector<value_t> sigma2_inv(ssm);
-  std::vector<value_t> coeff12(ssm);
-
-  for (int64_t state = 0; state < ssm; ++state) {
-    const value_t alpha = a_diag[state];
-    const value_t gamma = g_diag[state];
-    const value_t sigma = step[state];
-
-    const value_t denom = value_t(1) + sigma * gamma;
-    const value_t inv_val = value_t(1) / denom;
-    const value_t sigma2_inv_val = sigma * sigma * inv_val;
-
-    inv[state] = inv_val;
-    sigma2_inv[state] = sigma2_inv_val;
-    coeff12[state] = -alpha * sigma2_inv_val;
-  }
-
   at::parallel_for(0, ssm, 1, [&](int64_t begin, int64_t end) {
     for (int64_t state = begin; state < end; ++state) {
       const value_t alpha = a_diag[state];
       const value_t gamma = g_diag[state];
       const value_t sigma = step[state];
-      const value_t inv_val = inv[state];
-      const value_t sigma2_inv_val = sigma2_inv[state];
-      const value_t coeff12_val = coeff12[state];
+      const value_t sigma_sq = sigma * sigma;
+      const value_t denom = value_t(1) + sigma * gamma;
+      const value_t inv_val = value_t(1) / denom;
+      const value_t sigma2_inv_val = sigma_sq * inv_val;
+      const value_t coeff12_val = -alpha * sigma2_inv_val;
 
       value_t grad_alpha_state = value_t(0);
       value_t grad_sigma2_inv_state = value_t(0);
@@ -216,7 +182,6 @@ void dlinoss_imex1_backward_cpu_kernel(const typename ComplexTraits<scalar_t>::v
         }
       }
 
-      const value_t sigma_sq = sigma * sigma;
       const value_t grad_inv_total = grad_inv_state + grad_sigma2_inv_state * sigma_sq;
 
       const value_t inv_sq = inv_val * inv_val;

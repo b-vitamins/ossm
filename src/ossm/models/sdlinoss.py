@@ -155,6 +155,16 @@ class SelectiveDLinOSSLayer(nn.Module):
             raise ValueError(
                 "SelectiveDLinOSSLayer expects input of shape (batch, length, hidden_dim)."
             )
+        try:
+            import torch._dynamo as _dynamo  # type: ignore[attr-defined]
+
+            try:
+                if _dynamo.is_compiling():  # pragma: no cover - runtime guard
+                    _dynamo.graph_break()
+            except RuntimeError:
+                pass
+        except Exception:
+            pass
         B, L, H = inputs.shape
         if H != self.hidden_dim:
             raise ValueError(f"Expected hidden_dim={self.hidden_dim}, received {H}.")

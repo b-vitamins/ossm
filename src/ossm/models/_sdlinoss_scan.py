@@ -407,8 +407,10 @@ def run_sdlinoss(variant: str, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu:
 
     if not _use_kernels(variant):
         _graph_break_if_compiling()
+
         def _fallback() -> Tensor:
             return _fallback_from_views()
+
         _dynamo = _maybe_dynamo_module()
         if _dynamo is not None:
             try:
@@ -422,6 +424,7 @@ def run_sdlinoss(variant: str, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu:
                         return cast(Tensor, disable_fn(_fallback)())
             except RuntimeError:
                 pass
+
         with autocast("cuda", enabled=False):
             return _fallback()
 
