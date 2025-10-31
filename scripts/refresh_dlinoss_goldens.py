@@ -81,12 +81,13 @@ def _compute_coefficients(
     one = jnp.ones_like(a_diag)
     if variant == "imex1":
         denom = one + step * g_diag
-        m11 = one / denom
-        m12 = -(step * a_diag) / denom
-        m21 = step / denom
-        m22 = one - (step**2 * a_diag) / denom
-        f1 = step / denom
-        f2 = step**2 / denom
+        inv = one / denom
+        m11 = inv
+        m12 = -(step**2 * a_diag) * inv
+        m21 = inv
+        m22 = one + m12
+        f1 = (step**2) * inv
+        f2 = f1
     elif variant == "imex2":
         m11 = one - step * g_diag
         m12 = -(step * a_diag)

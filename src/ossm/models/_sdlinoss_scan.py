@@ -155,7 +155,7 @@ def _reference_sdlinoss_states_from_views(
     dt = torch.clamp(step, min=1e-6, max=1.0)
     bu = bu.contiguous()
 
-    z = torch.zeros(batch, ssm, dtype=complex_dtype, device=device)
+    aux = torch.zeros(batch, ssm, dtype=complex_dtype, device=device)
     x = torch.zeros(batch, ssm, dtype=complex_dtype, device=device)
     states = torch.empty(length, batch, ssm, 2, dtype=complex_dtype, device=device)
 
@@ -171,18 +171,22 @@ def _reference_sdlinoss_states_from_views(
 
         if variant == "imex1":
             S = torch.clamp(1.0 + dt_t * g_t, min=1e-6)
-            z = (z + dt_t * (-a_t * x + bu_t)) / S
+            comb = -a_t * x + bu_t
+            aux = (aux + (dt_t * dt_t) * comb) / S
+            x = x + aux
         elif variant == "imex2":
             S = torch.clamp(1.0 + (dt_t * dt_t) * a_t, min=1e-6)
-            z = (z + dt_t * (-a_t * x - g_t * z + bu_t)) / S
+            aux = (aux + dt_t * (-a_t * x - g_t * aux + bu_t)) / S
+            x = x + dt_t * aux
         elif variant == "im":
             S = torch.clamp(1.0 + dt_t * g_t + (dt_t * dt_t) * a_t, min=1e-6)
-            z = (z + dt_t * (-a_t * x + bu_t)) / S
+            aux = (aux + dt_t * (-a_t * x + bu_t)) / S
+            x = x + dt_t * aux
         else:  # ex
-            z = z + dt_t * (-a_t * x - g_t * z + bu_t)
+            aux = aux + dt_t * (-a_t * x - g_t * aux + bu_t)
+            x = x + dt_t * aux
 
-        x = x + dt_t * z
-        states[t, :, :, 0] = z
+        states[t, :, :, 0] = aux
         states[t, :, :, 1] = x
 
     return states

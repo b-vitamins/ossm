@@ -33,23 +33,24 @@ def build_M_F_imex1(A: Tensor, G: Tensor, dt: Tensor) -> Tuple[Tuple[Tensor, Ten
     S = 1.0 + dt * G
     Sinv = 1.0 / torch.clamp(S, min=1e-6)
     M11 = 1.0 - (dt * dt) * Sinv * A
-    M12 = dt * Sinv
-    M21 = -dt * Sinv * A
+    M12 = Sinv
+    M21 = -(dt * dt) * Sinv * A
     M22 = Sinv
     F1 = (dt * dt) * Sinv
-    F2 = dt * Sinv
+    F2 = F1
     return (M11, M12, M21, M22), (F1, F2)
 
 
 def naive_rollout_imex1(A: Tensor, G: Tensor, dt: Tensor, u: Tensor) -> Tensor:
     L, B, M = u.shape
-    z = torch.zeros(B, M, dtype=u.dtype, device=u.device)
+    w = torch.zeros(B, M, dtype=u.dtype, device=u.device)
     x = torch.zeros(B, M, dtype=u.dtype, device=u.device)
     xs = []
     for t in range(L):
         S = 1.0 + dt[t] * G[t]
-        z = (z + dt[t] * (-A[t] * x + u[t])) / torch.clamp(S, min=1e-6)
-        x = x + dt[t] * z
+        comb = -A[t] * x + u[t]
+        w = (w + (dt[t] * dt[t]) * comb) / torch.clamp(S, min=1e-6)
+        x = x + w
         xs.append(x)
     return torch.stack(xs, dim=0)
 
