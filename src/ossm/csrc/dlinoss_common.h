@@ -221,14 +221,18 @@ inline GradStrided3<scalar_t> make_grad_strided3(
     *s = size == 1 ? 0 : stride;
   };
 
+  auto check_size = [](int64_t size, int64_t expected) {
+    return size == expected || size == 1;
+  };
+
   switch (tensor.dim()) {
     case 1: {
       const int64_t size_m = sizes[0];
       TORCH_CHECK(
-          size_m == ssm,
+          check_size(size_m, ssm),
           "Expected gradient last dimension to match state size ",
           ssm,
-          ", got ",
+          " or be 1, got ",
           size_m);
       assign_axis(2, size_m, strides[0]);
       break;
@@ -237,10 +241,10 @@ inline GradStrided3<scalar_t> make_grad_strided3(
       const int64_t size0 = sizes[0];
       const int64_t size1 = sizes[1];
       TORCH_CHECK(
-          size1 == ssm,
+          check_size(size1, ssm),
           "Expected gradient last dimension to match state size ",
           ssm,
-          ", got ",
+          " or be 1, got ",
           size1);
       if (size0 == length || size0 == 1) {
         assign_axis(0, size0, strides[0]);
