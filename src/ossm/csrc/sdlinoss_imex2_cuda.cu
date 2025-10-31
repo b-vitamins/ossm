@@ -93,9 +93,9 @@ __global__ void sdlinoss_imex2_backward_kernel(
     const scalar_t* __restrict__ states_ptr,
     const scalar_t* __restrict__ grad_out_ptr,
     scalar_t* __restrict__ grad_bu_ptr,
-    typename scalar_t::value_type* __restrict__ grad_A_ptr,
-    typename scalar_t::value_type* __restrict__ grad_G_ptr,
-    typename scalar_t::value_type* __restrict__ grad_step_ptr,
+    GradStrided3<typename scalar_t::value_type> grad_A,
+    GradStrided3<typename scalar_t::value_type> grad_G,
+    GradStrided3<typename scalar_t::value_type> grad_step,
     int64_t length,
     int64_t batch,
     int64_t ssm) {
@@ -199,9 +199,9 @@ __global__ void sdlinoss_imex2_backward_kernel(
       const value_t grad_bu_real = grad_temp_real * dt;
       const value_t grad_bu_imag = grad_temp_imag * dt;
 
-      grad_A_ptr[offset] = grad_A_local;
-      grad_G_ptr[offset] = grad_G_local;
-      grad_step_ptr[offset] = grad_step_local * step_mask;
+      grad_A.store(t, b, m, grad_A_local);
+      grad_G.store(t, b, m, grad_G_local);
+      grad_step.store(t, b, m, grad_step_local * step_mask);
       grad_bu_ptr[offset] = scalar_t(grad_bu_real, grad_bu_imag);
 
       grad_x_next_real = grad_x_prev_real;
@@ -274,6 +274,9 @@ void sdlinoss_imex2_backward_cuda(const at::Tensor& A,
     const auto G_strided = make_strided3<typename scalar_t::value_type>(G, length, batch, ssm);
     const auto step_strided = make_strided3<typename scalar_t::value_type>(step, length, batch, ssm);
     const auto bu_strided = make_strided3<scalar_t>(bu, length, batch, ssm);
+    auto grad_A_strided = make_grad_strided3<typename scalar_t::value_type>(grad_A, length, batch, ssm);
+    auto grad_G_strided = make_grad_strided3<typename scalar_t::value_type>(grad_G, length, batch, ssm);
+    auto grad_step_strided = make_grad_strided3<typename scalar_t::value_type>(grad_step, length, batch, ssm);
     sdlinoss_imex2_backward_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
         A_strided,
         G_strided,
@@ -282,9 +285,9 @@ void sdlinoss_imex2_backward_cuda(const at::Tensor& A,
         states.data_ptr<scalar_t>(),
         grad_output.data_ptr<scalar_t>(),
         grad_bu.data_ptr<scalar_t>(),
-        grad_A.data_ptr<typename scalar_t::value_type>(),
-        grad_G.data_ptr<typename scalar_t::value_type>(),
-        grad_step.data_ptr<typename scalar_t::value_type>(),
+        grad_A_strided,
+        grad_G_strided,
+        grad_step_strided,
         length,
         batch,
         ssm);
