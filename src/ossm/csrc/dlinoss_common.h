@@ -7,6 +7,11 @@
 #include <c10/util/Exception.h>
 #include <c10/util/complex.h>
 
+#if defined(__CUDACC__)
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+#endif
+
 namespace ossm {
 
 template <typename scalar_t>
@@ -272,6 +277,64 @@ inline GradStrided3<scalar_t> make_grad_strided3(
   result.reduce_B = (result.nB == 1 && batch > 1);
   result.reduce_M = (result.nM == 1 && ssm > 1);
   return result;
+}
+
+template <typename value_t, typename cplx_t>
+struct Pair2x2 {
+  value_t a, b, c, d;
+  cplx_t f1, f2;
+};
+
+template <typename value_t, typename cplx_t>
+C10_HOST_DEVICE inline Pair2x2<value_t, cplx_t> pair_identity() {
+  Pair2x2<value_t, cplx_t> pair;
+  pair.a = value_t(1);
+  pair.b = value_t(0);
+  pair.c = value_t(0);
+  pair.d = value_t(1);
+  pair.f1 = cplx_t(0, 0);
+  pair.f2 = cplx_t(0, 0);
+  return pair;
+}
+
+template <typename value_t, typename cplx_t>
+C10_HOST_DEVICE inline Pair2x2<value_t, cplx_t> pair_combine(
+    const Pair2x2<value_t, cplx_t>& L,
+    const Pair2x2<value_t, cplx_t>& R) {
+  Pair2x2<value_t, cplx_t> out;
+  out.a = R.a * L.a + R.b * L.c;
+  out.b = R.a * L.b + R.b * L.d;
+  out.c = R.c * L.a + R.d * L.c;
+  out.d = R.c * L.b + R.d * L.d;
+
+  const value_t f1_real = R.a * L.f1.real() + R.b * L.f2.real() + R.f1.real();
+  const value_t f1_imag = R.a * L.f1.imag() + R.b * L.f2.imag() + R.f1.imag();
+  const value_t f2_real = R.c * L.f1.real() + R.d * L.f2.real() + R.f2.real();
+  const value_t f2_imag = R.c * L.f1.imag() + R.d * L.f2.imag() + R.f2.imag();
+
+  out.f1 = cplx_t(f1_real, f1_imag);
+  out.f2 = cplx_t(f2_real, f2_imag);
+  return out;
+}
+
+template <typename value_t, typename cplx_t>
+C10_HOST_DEVICE inline void pair_apply_state(
+    const Pair2x2<value_t, cplx_t>& pair,
+    cplx_t z_in,
+    cplx_t x_in,
+    cplx_t& z_out,
+    cplx_t& x_out) {
+  const value_t z_real =
+      pair.a * z_in.real() + pair.b * x_in.real() + pair.f1.real();
+  const value_t z_imag =
+      pair.a * z_in.imag() + pair.b * x_in.imag() + pair.f1.imag();
+  const value_t x_real =
+      pair.c * z_in.real() + pair.d * x_in.real() + pair.f2.real();
+  const value_t x_imag =
+      pair.c * z_in.imag() + pair.d * x_in.imag() + pair.f2.imag();
+
+  z_out = cplx_t(z_real, z_imag);
+  x_out = cplx_t(x_real, x_imag);
 }
 
 }  // namespace ossm
