@@ -315,10 +315,6 @@ void sdlinoss_im_backward_cpu(const at::Tensor& A,
   });
 }
 
-#ifdef WITH_CUDA
-}  // namespace
-#endif
-
 torch::Tensor sdlinoss_im_forward(const at::Tensor& A,
                                   const at::Tensor& G,
                                   const at::Tensor& step,
