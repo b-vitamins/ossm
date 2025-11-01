@@ -180,11 +180,12 @@ class SelectiveDLinOSSLayer(nn.Module):
         r = torch.sigmoid(base_r + delta_r).to(dtype=compute_dtype)
         theta = (math.pi * torch.tanh(base_th + delta_th)).to(dtype=compute_dtype)
 
+        dt_floor = 0.02
         if self.dt_head is None:
-            dt = torch.sigmoid(self.dt_base).view(1, 1, -1).expand(B, L, self.ssm_size)
+            raw_dt = torch.sigmoid(self.dt_base).view(1, 1, -1).expand(B, L, self.ssm_size)
         else:
-            dt = torch.sigmoid(self.dt_base.view(1, 1, -1) + self.dt_head(feats))
-        dt = dt.to(dtype=compute_dtype)
+            raw_dt = torch.sigmoid(self.dt_base.view(1, 1, -1) + self.dt_head(feats))
+        dt = (dt_floor + (1.0 - dt_floor) * raw_dt).to(dtype=compute_dtype)
 
         r2 = torch.clamp(r * r, min=1e-8)
         cos_t = torch.cos(theta)

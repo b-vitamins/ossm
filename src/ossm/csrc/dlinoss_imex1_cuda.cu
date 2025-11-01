@@ -29,10 +29,12 @@ __global__ void dlinoss_imex1_forward_kernel(const typename scalar_t::value_type
 
     const value_t denom = value_t(1) + sigma * gamma;
     const value_t inv = value_t(1) / denom;
-    const value_t sigma_inv = sigma * inv;
     const value_t sigma2_inv = sigma * sigma * inv;
-    const value_t coeff12 = -alpha * sigma_inv;
-    const value_t coeff22 = value_t(1) - alpha * sigma2_inv;
+    // The kernel evolves the scaled auxiliary state w = dt * z to avoid the
+    // 1/dt conditioning issues present when storing z directly.  This produces
+    // the same x trajectory as the official implementation because x_{k+1} =
+    // x_k + w_{k+1} with a time-invariant dt per mode.
+    const value_t coeff12 = -alpha * sigma2_inv;
 
     value_t state0_real = value_t(0);
     value_t state0_imag = value_t(0);
@@ -47,10 +49,12 @@ __global__ void dlinoss_imex1_forward_kernel(const typename scalar_t::value_type
       const value_t bu_real = bu_val.real();
       const value_t bu_imag = bu_val.imag();
 
-      const value_t new0_real = state0_real * inv + state1_real * coeff12 + bu_real * sigma_inv;
-      const value_t new0_imag = state0_imag * inv + state1_imag * coeff12 + bu_imag * sigma_inv;
-      const value_t new1_real = state0_real * sigma_inv + state1_real * coeff22 + bu_real * sigma2_inv;
-      const value_t new1_imag = state0_imag * sigma_inv + state1_imag * coeff22 + bu_imag * sigma2_inv;
+      const value_t bu_scale_real = bu_real * sigma2_inv;
+      const value_t bu_scale_imag = bu_imag * sigma2_inv;
+      const value_t new0_real = state0_real * inv + state1_real * coeff12 + bu_scale_real;
+      const value_t new0_imag = state0_imag * inv + state1_imag * coeff12 + bu_scale_imag;
+      const value_t new1_real = new0_real + state1_real;
+      const value_t new1_imag = new0_imag + state1_imag;
 
       out_ptr[out_offset] = scalar_t(new0_real, new0_imag);
       out_ptr[out_offset + 1] = scalar_t(new1_real, new1_imag);
@@ -91,10 +95,9 @@ __global__ void dlinoss_imex1_backward_kernel(const typename scalar_t::value_typ
 
     const value_t denom = value_t(1) + sigma * gamma;
     const value_t inv = value_t(1) / denom;
-    const value_t sigma_inv = sigma * inv;
     const value_t sigma2_inv = sigma * sigma * inv;
-    const value_t coeff12 = -alpha * sigma_inv;
-    const value_t coeff22 = value_t(1) - alpha * sigma2_inv;
+    const value_t coeff12 = -alpha * sigma2_inv;
+    const value_t inv_sq = inv * inv;
 
     value_t grad_state0_real = value_t(0);
     value_t grad_state0_imag = value_t(0);
@@ -102,7 +105,6 @@ __global__ void dlinoss_imex1_backward_kernel(const typename scalar_t::value_typ
     value_t grad_state1_imag = value_t(0);
 
     value_t grad_alpha_local = value_t(0);
-    value_t grad_sigma_inv_local = value_t(0);
     value_t grad_sigma2_inv_local = value_t(0);
     value_t grad_inv_local = value_t(0);
 
@@ -129,28 +131,25 @@ __global__ void dlinoss_imex1_backward_kernel(const typename scalar_t::value_typ
       const value_t grad_new0_real = grad_state0_real;
       const value_t grad_new0_imag = grad_state0_imag;
 
-      const value_t neg_alpha_prev1_real = -alpha * prev1_real;
-      const value_t neg_alpha_prev1_imag = -alpha * prev1_imag;
-      const value_t bu_combined_real = neg_alpha_prev1_real + bu_real;
-      const value_t bu_combined_imag = neg_alpha_prev1_imag + bu_imag;
+      const value_t grad_total_real = grad_new0_real + grad_new1_real;
+      const value_t grad_total_imag = grad_new0_imag + grad_new1_imag;
 
-      grad_sigma_inv_local += grad_new0_real * bu_combined_real + grad_new0_imag * bu_combined_imag;
-      grad_sigma_inv_local += grad_new1_real * prev0_real + grad_new1_imag * prev0_imag;
-      grad_sigma2_inv_local += grad_new1_real * bu_combined_real + grad_new1_imag * bu_combined_imag;
-      grad_alpha_local += grad_new0_real * (-sigma_inv * prev1_real) +
-                          grad_new0_imag * (-sigma_inv * prev1_imag);
-      grad_alpha_local += grad_new1_real * (-sigma2_inv * prev1_real) +
-                          grad_new1_imag * (-sigma2_inv * prev1_imag);
-      grad_inv_local += grad_new0_real * prev0_real + grad_new0_imag * prev0_imag;
+      const value_t comb_real = bu_real - alpha * prev1_real;
+      const value_t comb_imag = bu_imag - alpha * prev1_imag;
 
-      const value_t grad_bu_real = grad_new0_real * sigma_inv + grad_new1_real * sigma2_inv;
-      const value_t grad_bu_imag = grad_new0_imag * sigma_inv + grad_new1_imag * sigma2_inv;
+      grad_sigma2_inv_local += grad_total_real * comb_real + grad_total_imag * comb_imag;
+      grad_alpha_local += grad_total_real * (-sigma2_inv * prev1_real) +
+                          grad_total_imag * (-sigma2_inv * prev1_imag);
+      grad_inv_local += grad_total_real * prev0_real + grad_total_imag * prev0_imag;
+
+      const value_t grad_bu_real = grad_total_real * sigma2_inv;
+      const value_t grad_bu_imag = grad_total_imag * sigma2_inv;
       grad_bu_ptr[bu_offset] = scalar_t(grad_bu_real, grad_bu_imag);
 
-      const value_t grad_prev0_real = grad_new0_real * inv + grad_new1_real * sigma_inv;
-      const value_t grad_prev0_imag = grad_new0_imag * inv + grad_new1_imag * sigma_inv;
-      const value_t grad_prev1_real = grad_new0_real * coeff12 + grad_new1_real * coeff22;
-      const value_t grad_prev1_imag = grad_new0_imag * coeff12 + grad_new1_imag * coeff22;
+      const value_t grad_prev0_real = grad_total_real * inv;
+      const value_t grad_prev0_imag = grad_total_imag * inv;
+      const value_t grad_prev1_real = grad_new1_real + grad_total_real * coeff12;
+      const value_t grad_prev1_imag = grad_new1_imag + grad_total_imag * coeff12;
 
       grad_state0_real = grad_prev0_real;
       grad_state0_imag = grad_prev0_imag;
@@ -158,16 +157,15 @@ __global__ void dlinoss_imex1_backward_kernel(const typename scalar_t::value_typ
       grad_state1_imag = grad_prev1_imag;
     }
 
-    value_t grad_sigma_local = grad_sigma_inv_local * inv;
-    value_t grad_inv_total = grad_inv_local + grad_sigma_inv_local * sigma;
+    const value_t sigma_sq = sigma * sigma;
+    const value_t grad_inv_total = grad_inv_local + grad_sigma2_inv_local * sigma_sq;
 
-    const value_t grad_sigma_sq = grad_sigma2_inv_local * inv;
-    grad_inv_total += grad_sigma2_inv_local * sigma * sigma;
-    grad_sigma_local += grad_sigma_sq * value_t(2) * sigma;
+    const value_t d_inv_d_sigma = -gamma * inv_sq;
+    const value_t d_inv_d_gamma = -sigma * inv_sq;
 
-    const value_t inv_sq = inv * inv;
-    grad_sigma_local += grad_inv_total * (-gamma) * inv_sq;
-    const value_t grad_gamma_local = grad_inv_total * (-sigma) * inv_sq;
+    const value_t grad_sigma_local =
+        grad_sigma2_inv_local * (value_t(2) * sigma * inv) + grad_inv_total * d_inv_d_sigma;
+    const value_t grad_gamma_local = grad_inv_total * d_inv_d_gamma;
 
     atomicAdd(grad_a_ptr + state, grad_alpha_local);
     atomicAdd(grad_step_ptr + state, grad_sigma_local);

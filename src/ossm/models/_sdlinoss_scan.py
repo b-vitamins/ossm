@@ -141,6 +141,25 @@ def _normalize_param(
     )
 
 
+def _validate_kernel_inputs(A: Tensor, G: Tensor, step: Tensor, bu: Tensor) -> None:
+    length, batch, ssm = bu.shape
+    for name, tensor in ("A", A), ("G", G), ("step", step):
+        if tensor.dim() != 3 or tensor.shape[2] != ssm:
+            raise ValueError(
+                f"{name} must be a 3D tensor with trailing dimension {ssm}; got {tuple(tensor.shape)}."
+            )
+        if tensor.shape[0] not in (1, length):
+            raise ValueError(
+                f"{name} has incompatible length dimension {tensor.shape[0]} for sequence length {length}."
+            )
+        if tensor.shape[1] not in (1, batch):
+            raise ValueError(
+                f"{name} has incompatible batch dimension {tensor.shape[1]} for batch size {batch}."
+            )
+        if not tensor.is_contiguous():
+            raise ValueError(f"{name} must be contiguous before launching the CUDA kernels.")
+
+
 def _reference_sdlinoss_states_from_views(
     variant: str,
     A: Tensor,
@@ -155,7 +174,7 @@ def _reference_sdlinoss_states_from_views(
     dt = torch.clamp(step, min=1e-6, max=1.0)
     bu = bu.contiguous()
 
-    z = torch.zeros(batch, ssm, dtype=complex_dtype, device=device)
+    aux = torch.zeros(batch, ssm, dtype=complex_dtype, device=device)
     x = torch.zeros(batch, ssm, dtype=complex_dtype, device=device)
     states = torch.empty(length, batch, ssm, 2, dtype=complex_dtype, device=device)
 
@@ -171,18 +190,25 @@ def _reference_sdlinoss_states_from_views(
 
         if variant == "imex1":
             S = torch.clamp(1.0 + dt_t * g_t, min=1e-6)
-            z = (z + dt_t * (-a_t * x + bu_t)) / S
+            comb = -a_t * x + bu_t
+            aux = (aux + (dt_t * dt_t) * comb) / S
+            x = x + aux
         elif variant == "imex2":
             S = torch.clamp(1.0 + (dt_t * dt_t) * a_t, min=1e-6)
-            z = (z + dt_t * (-a_t * x - g_t * z + bu_t)) / S
+            aux = (aux + dt_t * (-a_t * x - g_t * aux + bu_t)) / S
+            x = x + dt_t * aux
         elif variant == "im":
             S = torch.clamp(1.0 + dt_t * g_t + (dt_t * dt_t) * a_t, min=1e-6)
-            z = (z + dt_t * (-a_t * x + bu_t)) / S
+            comb = -a_t * x + bu_t
+            aux = (aux + (dt_t * dt_t) * comb) / S
+            x = x + aux
         else:  # ex
-            z = z + dt_t * (-a_t * x - g_t * z + bu_t)
+            comb = -a_t * x + bu_t
+            alpha = 1.0 - dt_t * g_t
+            aux = alpha * aux + (dt_t * dt_t) * comb
+            x = x + aux
 
-        x = x + dt_t * z
-        states[t, :, :, 0] = z
+        states[t, :, :, 0] = aux
         states[t, :, :, 1] = x
 
     return states
@@ -258,6 +284,7 @@ class _SdlinossImex1Fn(torch.autograd.Function):
         if kernels is None:
             raise RuntimeError("Selective D-LinOSS kernels are unavailable; cannot use optimized path.")
 
+        _validate_kernel_inputs(A, G, step, bu)
         states = kernels.sdlinoss_imex1_forward(A, G, step, bu)
         ctx.save_for_backward(A, G, step, bu, states)
         return states[..., 1]
@@ -281,6 +308,7 @@ class _SdlinossImex2Fn(torch.autograd.Function):
         if kernels is None:
             raise RuntimeError("Selective D-LinOSS kernels are unavailable; cannot use optimized path.")
 
+        _validate_kernel_inputs(A, G, step, bu)
         states = kernels.sdlinoss_imex2_forward(A, G, step, bu)
         ctx.save_for_backward(A, G, step, bu, states)
         return states[..., 1]
@@ -304,6 +332,7 @@ class _SdlinossImFn(torch.autograd.Function):
         if kernels is None:
             raise RuntimeError("Selective D-LinOSS kernels are unavailable; cannot use optimized path.")
 
+        _validate_kernel_inputs(A, G, step, bu)
         states = kernels.sdlinoss_im_forward(A, G, step, bu)
         ctx.save_for_backward(A, G, step, bu, states)
         return states[..., 1]
@@ -327,6 +356,7 @@ class _SdlinossExFn(torch.autograd.Function):
         if kernels is None:
             raise RuntimeError("Selective D-LinOSS kernels are unavailable; cannot use optimized path.")
 
+        _validate_kernel_inputs(A, G, step, bu)
         states = kernels.sdlinoss_ex_forward(A, G, step, bu)
         ctx.save_for_backward(A, G, step, bu, states)
         return states[..., 1]
@@ -404,6 +434,14 @@ def run_sdlinoss(variant: str, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu:
     else:
         fn = _SdlinossExFn
 
+    # The CUDA kernels index the parameter tensors as contiguous (L, B, M) buffers.
+    # Copy the broadcast-normalized views so the fast path cannot read stray memory
+    # even if the caller provides lower-dimensional inputs.
+    A_ctg = A_view.contiguous()
+    G_ctg = G_view.contiguous()
+    step_ctg = step_view.contiguous()
+    bu_ctg = bu.contiguous()
+
     with autocast("cuda", enabled=False):
-        return cast(Tensor, fn.apply(a_diag, g_diag, step, bu))
+        return cast(Tensor, fn.apply(A_ctg, G_ctg, step_ctg, bu_ctg))
 
