@@ -1,11 +1,38 @@
 import pytest
 import torch
 
-from ossm.models._dlinoss_scan import run_dlinoss
+from ossm.models._dlinoss_scan import _reference_dlinoss_states, run_dlinoss
 from ossm.models.dlinoss import DampedLinOSSBackbone, DampedLinOSSLayer
 
 
 VARIANTS = ("imex1", "imex2", "im", "ex")
+
+
+def _official_imex1_states(
+    a_diag: torch.Tensor, g_diag: torch.Tensor, step: torch.Tensor, bu: torch.Tensor
+) -> torch.Tensor:
+    """Sequential reference mirroring the official Damped-LinOSS recurrence."""
+
+    length, batch, ssm = bu.shape
+    if a_diag.shape != (ssm,) or g_diag.shape != (ssm,) or step.shape != (ssm,):
+        raise ValueError("coefficient diagonals must match the state size")
+
+    a_diag_c = a_diag.view(1, -1).to(dtype=bu.dtype, device=bu.device)
+    step_c = step.view(1, -1).to(dtype=bu.dtype, device=bu.device)
+    denom = (1.0 + step * g_diag).view(1, -1).to(dtype=bu.dtype, device=bu.device)
+
+    z = torch.zeros(batch, ssm, dtype=bu.dtype, device=bu.device)
+    x = torch.zeros_like(z)
+    traj: list[torch.Tensor] = []
+
+    for t in range(length):
+        bu_t = bu[t]
+        comb = -a_diag_c * x + bu_t
+        z = (z + step_c * comb) / denom
+        x = x + step_c * z
+        traj.append(torch.stack((z, x), dim=-1))
+
+    return torch.stack(traj, dim=0)
 
 
 def _reference_dlinoss(layer: DampedLinOSSLayer, inputs: torch.Tensor) -> torch.Tensor:
@@ -142,3 +169,20 @@ def test_dlinoss_gradients_flow(variant: str) -> None:
     assert layer.G_diag.grad is not None and layer.G_diag.grad.abs().sum() > 0
     assert layer.B.grad is not None and layer.B.grad.abs().sum() > 0
     assert layer.C.grad is not None and layer.C.grad.abs().sum() > 0
+
+
+def test_dlinoss_imex1_matches_official_recurrence() -> None:
+    torch.manual_seed(7)
+    length, batch, ssm = 9, 2, 4
+    a_diag = torch.rand(ssm)
+    g_diag = torch.rand(ssm)
+    step = torch.rand(ssm) * 0.5 + 0.1
+    bu = torch.randn(length, batch, ssm, dtype=torch.complex64)
+
+    states = _reference_dlinoss_states("imex1", a_diag, g_diag, step, bu)
+    official = _official_imex1_states(a_diag, g_diag, step, bu)
+
+    step_scale = step.view(1, 1, -1).to(dtype=states.real.dtype)
+    z_kernel = states[..., 0] / step_scale
+    torch.testing.assert_close(z_kernel, official[..., 0], rtol=1e-6, atol=1e-7)
+    torch.testing.assert_close(states[..., 1], official[..., 1], rtol=1e-6, atol=1e-7)

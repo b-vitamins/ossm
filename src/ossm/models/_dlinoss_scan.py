@@ -53,13 +53,19 @@ def _reference_dlinoss_states(
 
         if variant == "imex1":
             denom = ones + step_f * g_diag_f
+            # The official D-LinOSS recurrence (JAX implementation) keeps the
+            # auxiliary variable z.  We evolve w = dt * z instead, which is
+            # algebraically equivalent for fixed per-mode dt and avoids the
+            # 1/dt amplification discussed in the conditioning analysis.  The
+            # associated state transition maps directly onto the same x sequence
+            # because x_{k+1} = x_k + w_{k+1} and w_{k+1} = dt * z_{k+1}.
             m11 = 1.0 / denom
-            m12 = -(step_f * a_diag_f) / denom
-            m21 = step_f / denom
-            m22 = ones - (step_f * step_f * a_diag_f) / denom
-            scale = (step_broadcast / denom.view(1, 1, -1))
+            m12 = -(step_f * step_f * a_diag_f) / denom
+            m21 = m11
+            m22 = ones + m12
+            scale = (step_broadcast * step_broadcast) / denom.view(1, 1, -1)
             f1 = bu_c * scale
-            f2 = bu_c * (scale * step_broadcast)
+            f2 = f1
         elif variant == "imex2":
             m11 = ones - step_f * g_diag_f
             m12 = -step_f * a_diag_f
