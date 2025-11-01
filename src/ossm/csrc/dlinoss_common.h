@@ -337,5 +337,94 @@ C10_HOST_DEVICE inline void pair_apply_state(
   x_out = cplx_t(x_real, x_imag);
 }
 
+// ---- Builders: turn (A,G,dt,bu) into Pair2x2 for each variant ----
+
+namespace detail {
+
+template <typename value_t>
+C10_HOST_DEVICE inline value_t clamp_stability_value(value_t raw) {
+  const value_t lower = static_cast<value_t>(1e-6);
+  return raw < lower ? lower : raw;
+}
+
+}  // namespace detail
+
+template <typename value_t, typename cplx_t>
+C10_HOST_DEVICE inline Pair2x2<value_t, cplx_t> build_pair_imex1(
+    value_t a, value_t g, value_t dt, cplx_t bu) {
+  // new_z = (z + dt*(-a*x + bu)) / (1+dt*g)
+  // new_x = x + dt*new_z
+  const value_t dt2 = dt * dt;
+  const value_t S = detail::clamp_stability_value(value_t(1) + dt * g);
+  const value_t invS = value_t(1) / S;
+  Pair2x2<value_t, cplx_t> P;
+  P.a = invS;
+  P.b = -dt * invS * a;
+  P.c = dt * invS;
+  P.d = value_t(1) - dt2 * invS * a;
+  const value_t bu_scale_dt = dt * invS;
+  const value_t bu_scale_dt2 = dt2 * invS;
+  P.f1 = cplx_t(bu_scale_dt * bu.real(), bu_scale_dt * bu.imag());
+  P.f2 = cplx_t(bu_scale_dt2 * bu.real(), bu_scale_dt2 * bu.imag());
+  return P;
+}
+
+template <typename value_t, typename cplx_t>
+C10_HOST_DEVICE inline Pair2x2<value_t, cplx_t> build_pair_imex2(
+    value_t a, value_t g, value_t dt, cplx_t bu) {
+  // new_z = (z + dt*(-a*x - g*z + bu)) / (1+dt^2*a)
+  // new_x = x + dt*new_z
+  const value_t dt2 = dt * dt;
+  const value_t S = detail::clamp_stability_value(value_t(1) + dt2 * a);
+  const value_t invS = value_t(1) / S;
+  const value_t one_minus_dtg = value_t(1) - dt * g;
+  Pair2x2<value_t, cplx_t> P;
+  P.a = invS * one_minus_dtg;
+  P.b = -dt * invS * a;
+  P.c = dt * invS * one_minus_dtg;
+  P.d = value_t(1) - dt2 * invS * a;
+  const value_t bu_scale_dt = dt * invS;
+  const value_t bu_scale_dt2 = dt2 * invS;
+  P.f1 = cplx_t(bu_scale_dt * bu.real(), bu_scale_dt * bu.imag());
+  P.f2 = cplx_t(bu_scale_dt2 * bu.real(), bu_scale_dt2 * bu.imag());
+  return P;
+}
+
+template <typename value_t, typename cplx_t>
+C10_HOST_DEVICE inline Pair2x2<value_t, cplx_t> build_pair_im(
+    value_t a, value_t g, value_t dt, cplx_t bu) {
+  // new_z = (z + dt*(-a*x + bu)) / (1+dt*g+dt^2*a)
+  // new_x = x + dt*new_z
+  const value_t dt2 = dt * dt;
+  const value_t S = detail::clamp_stability_value(value_t(1) + dt * g + dt2 * a);
+  const value_t invS = value_t(1) / S;
+  Pair2x2<value_t, cplx_t> P;
+  P.a = invS;
+  P.b = -dt * invS * a;
+  P.c = dt * invS;
+  P.d = value_t(1) - dt2 * invS * a;
+  const value_t bu_scale_dt = dt * invS;
+  const value_t bu_scale_dt2 = dt2 * invS;
+  P.f1 = cplx_t(bu_scale_dt * bu.real(), bu_scale_dt * bu.imag());
+  P.f2 = cplx_t(bu_scale_dt2 * bu.real(), bu_scale_dt2 * bu.imag());
+  return P;
+}
+
+template <typename value_t, typename cplx_t>
+C10_HOST_DEVICE inline Pair2x2<value_t, cplx_t> build_pair_ex(
+    value_t a, value_t g, value_t dt, cplx_t bu) {
+  // explicit: new_z = z + dt*(-a*x - g*z + bu); new_x = x + dt*new_z
+  const value_t dt2 = dt * dt;
+  const value_t one_minus_dtg = value_t(1) - dt * g;
+  Pair2x2<value_t, cplx_t> P;
+  P.a = one_minus_dtg;
+  P.b = -dt * a;
+  P.c = dt * one_minus_dtg;
+  P.d = value_t(1) - dt2 * a;
+  P.f1 = cplx_t(dt * bu.real(), dt * bu.imag());
+  P.f2 = cplx_t(dt2 * bu.real(), dt2 * bu.imag());
+  return P;
+}
+
 }  // namespace ossm
 
