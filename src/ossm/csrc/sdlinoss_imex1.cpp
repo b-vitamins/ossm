@@ -245,6 +245,13 @@ void sdlinoss_imex1_forward_cuda(const at::Tensor& A,
                                  const at::Tensor& bu,
                                  at::Tensor& output);
 
+void sdlinoss_imex1_forward_scan_cuda(const at::Tensor& A,
+                                      const at::Tensor& G,
+                                      const at::Tensor& step,
+                                      const at::Tensor& bu,
+                                      at::Tensor& tmp_states,
+                                      at::Tensor& tile_summ);
+
 void sdlinoss_imex1_backward_cuda(const at::Tensor& A,
                                   const at::Tensor& G,
                                   const at::Tensor& step,
