@@ -371,6 +371,7 @@ def evaluate_fullsort(
     max_batches: int | None = None,
     verbose: bool = False,
 ) -> Dict[str, float]:
+    logger = logging.getLogger(__name__)
     model.eval()
     accumulator = TopKMetricAccumulator(topk=topk)
     batch_count = 0
@@ -378,36 +379,60 @@ def evaluate_fullsort(
     total_candidates = 0
     min_candidates = float("inf")
     max_candidates = 0
+    dropped_examples = 0
     first_batch_debug: Dict[str, torch.Tensor] | None = None
     for batch in loader:
         batch = batch.to(device)
         logits = model.predict_logits(batch, include_padding=False)
         mask_history_inplace(logits, batch.user_ids, seen_items, offset=1)
         targets = (batch.target - 1).to(device=device)
-        accumulator.update(logits, targets)
         finite_mask = torch.isfinite(logits)
         candidate_counts = finite_mask.sum(dim=1)
-        total_examples += int(candidate_counts.size(0))
-        total_candidates += int(candidate_counts.sum().item())
-        if candidate_counts.numel():
-            min_candidates = min(min_candidates, int(candidate_counts.min().item()))
-            max_candidates = max(max_candidates, int(candidate_counts.max().item()))
+        valid_mask = candidate_counts > 0
+        all_valid = bool(valid_mask.all().item())
+        if not all_valid:
+            dropped = int((~valid_mask).sum().item())
+            dropped_examples += dropped
+            candidate_counts_valid = candidate_counts[valid_mask]
+            logits_valid = logits[valid_mask]
+            targets_valid = targets[valid_mask]
+        else:
+            candidate_counts_valid = candidate_counts
+            logits_valid = logits
+            targets_valid = targets
+
+        if logits_valid.numel():
+            accumulator.update(logits_valid, targets_valid)
+            total_examples += int(candidate_counts_valid.size(0))
+            total_candidates += int(candidate_counts_valid.sum().item())
+            if candidate_counts_valid.numel():
+                min_candidates = min(min_candidates, int(candidate_counts_valid.min().item()))
+                max_candidates = max(max_candidates, int(candidate_counts_valid.max().item()))
+        if log_predictions and first_batch_debug is None and logits_valid.numel():
+            topn = min(10, logits_valid.size(1))
+            top_scores, top_indices = torch.topk(logits_valid, topn, dim=1)
+            user_ids = batch.user_ids[valid_mask] if not all_valid else batch.user_ids
+            history_mask = batch.mask[valid_mask] if not all_valid else batch.mask
+            first_batch_debug = {
+                "user_ids": user_ids.detach().cpu(),
+                "targets": targets_valid.detach().cpu(),
+                "top_indices": top_indices.detach().cpu(),
+                "top_scores": top_scores.detach().cpu(),
+                "history_len": history_mask.sum(dim=1).to(torch.long).detach().cpu(),
+                "candidate_counts": candidate_counts_valid.detach().cpu(),
+            }
         batch_count += 1
         if max_batches is not None and batch_count >= int(max_batches):
             break
-        if log_predictions and first_batch_debug is None:
-            topn = min(10, logits.size(1))
-            top_scores, top_indices = torch.topk(logits, topn, dim=1)
-            first_batch_debug = {
-                "user_ids": batch.user_ids.detach().cpu(),
-                "targets": targets.detach().cpu(),
-                "top_indices": top_indices.detach().cpu(),
-                "top_scores": top_scores.detach().cpu(),
-                "history_len": batch.mask.sum(dim=1).to(torch.long).detach().cpu(),
-                "candidate_counts": candidate_counts.detach().cpu(),
-            }
     if batch_count == 0 or min_candidates == float("inf"):
         min_candidates = 0
+    if dropped_examples and not verbose:
+        logger.warning(
+            "Skipped %d eval examples with no candidate items (split=%s, topk=%d)",
+            dropped_examples,
+            split_name or "eval",
+            topk,
+        )
     average_candidates = (
         float(total_candidates) / total_examples if total_examples else 0.0
     )
@@ -426,14 +451,15 @@ def evaluate_fullsort(
             f" • examples={total_examples}"
             f" • candidates(min/mean/max)={min_candidates}/{average_candidates:.1f}/{max_candidates}"
         )
+        if dropped_examples:
+            coverage_message += f" • dropped={dropped_examples}"
         print(coverage_message)
-    if min_candidates < topk:
-        raise RuntimeError(
-            "Evaluation candidate pool is smaller than training.topk. "
-            f"split={split_name or 'eval'} has min_candidates={min_candidates} < topk={topk}. "
-            "The bundled smoke-test data masks almost every item; prepare the full dataset "
-            "with scripts/prepare_*.py or reduce training.topk."
+    if total_examples == 0:
+        logger.warning(
+            "No evaluable examples remained after masking history (split=%s)",
+            split_name or "eval",
         )
+        return accumulator.compute()
     if verbose and log_predictions and first_batch_debug is not None:
         print(
             "Eval predictions • "
@@ -453,7 +479,18 @@ def evaluate_fullsort(
                 f"  user={user_id} • target={target} • history={history_len} "
                 f"• candidates={candidates} • top={formatted}"
             )
-    return accumulator.compute()
+    metrics = accumulator.compute()
+    if (
+        accumulator.effective_topk is not None
+        and accumulator.effective_topk < topk
+        and total_examples > 0
+    ):
+        logger.info(
+            "Effective evaluation top-k clipped from %d to %d due to candidate availability",
+            topk,
+            accumulator.effective_topk,
+        )
+    return metrics
 
 
 def _format_split_metrics(split: str, metrics: Dict[str, float]) -> str:

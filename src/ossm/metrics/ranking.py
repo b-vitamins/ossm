@@ -100,9 +100,31 @@ class TopKMetricAccumulator:
     ndcg_total: float = 0.0
     mrr_total: float = 0.0
     count: int = 0
+    effective_topk: int | None = None
 
     def update(self, scores: torch.Tensor, target: torch.Tensor) -> None:
-        hits, ndcg, mrr = compute_topk_metrics(scores, target, topk=self.topk)
+        if scores.numel() == 0:
+            return
+        if scores.ndim != 2:
+            raise ValueError("scores must be a 2D tensor")
+        if target.ndim != 1:
+            raise ValueError("target must be a 1D tensor")
+        if scores.size(0) != target.size(0):
+            raise ValueError("scores and target batch dimensions must match")
+
+        finite_counts = torch.isfinite(scores).sum(dim=1)
+        if finite_counts.numel() == 0:
+            return
+        min_candidates = int(finite_counts.min().item())
+        if min_candidates <= 0:
+            return
+
+        k = min(self.topk, scores.size(1), min_candidates)
+        if k <= 0:
+            return
+
+        hits, ndcg, mrr = compute_topk_metrics(scores, target, topk=k)
+        self.effective_topk = k if self.effective_topk is None else min(self.effective_topk, k)
         self.hit_total += float(hits.sum().item())
         self.ndcg_total += float(ndcg.sum().item())
         self.mrr_total += float(mrr.sum().item())

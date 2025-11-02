@@ -3,6 +3,8 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 
+#include <math.h>
+
 #include "dlinoss_common.h"
 
 namespace ossm {
@@ -16,12 +18,24 @@ template <typename value_t>
 __device__ inline value_t clamp_step(value_t raw) {
   const value_t lower = static_cast<value_t>(kDtMin);
   const value_t upper = static_cast<value_t>(kDtMax);
-  return raw < lower ? lower : (raw > upper ? upper : raw);
+  if (!(raw == raw)) {
+    return lower;
+  }
+  if (raw < lower) {
+    return lower;
+  }
+  if (raw > upper) {
+    return upper;
+  }
+  return raw;
 }
 
 template <typename value_t>
 __device__ inline value_t clamp_stability(value_t raw) {
   const value_t lower = static_cast<value_t>(kClampMin);
+  if (!(raw == raw)) {
+    return lower;
+  }
   return raw < lower ? lower : raw;
 }
 
@@ -50,8 +64,14 @@ __global__ void sdlinoss_imex2_forward_kernel(
 
     for (int64_t t = 0; t < length; ++t) {
       const int64_t offset = t * series + idx;
-      const value_t a_t = A.load(t, b, m);
-      const value_t g_t = G.load(t, b, m);
+      value_t a_t = A.load(t, b, m);
+      value_t g_t = G.load(t, b, m);
+      if (!(a_t == a_t)) {
+        a_t = value_t(0);
+      }
+      if (!(g_t == g_t)) {
+        g_t = value_t(0);
+      }
       const value_t step_raw = step.load(t, b, m);
       const value_t dt = clamp_step(step_raw);
       const value_t dt2 = dt * dt;
@@ -143,11 +163,19 @@ __global__ void sdlinoss_imex2_backward_kernel(
       value_t grad_z_new_real = grad_z_next_real;
       value_t grad_z_new_imag = grad_z_next_imag;
 
-      const value_t a_t = A.load(t, b, m);
-      const value_t g_t = G.load(t, b, m);
+      value_t a_t = A.load(t, b, m);
+      value_t g_t = G.load(t, b, m);
+      if (!(a_t == a_t)) {
+        a_t = value_t(0);
+      }
+      if (!(g_t == g_t)) {
+        g_t = value_t(0);
+      }
       const value_t step_raw = step.load(t, b, m);
       const value_t dt = clamp_step(step_raw);
-      const value_t step_mask = (step_raw > value_t(kDtMin) && step_raw < value_t(kDtMax)) ? value_t(1) : value_t(0);
+      const value_t step_mask =
+          ((step_raw == step_raw) && (step_raw > value_t(kDtMin)) && (step_raw < value_t(kDtMax))) ? value_t(1)
+                                                                                                   : value_t(0);
       const value_t dt2 = dt * dt;
 
       const scalar_t bu_val = bu.load(t, b, m);
@@ -166,7 +194,8 @@ __global__ void sdlinoss_imex2_backward_kernel(
 
       const value_t S_raw = value_t(1) + dt2 * a_t;
       const value_t S = clamp_stability(S_raw);
-      const value_t clamp_mask = S_raw > value_t(kClampMin) ? value_t(1) : value_t(0);
+      const value_t clamp_mask =
+          ((S_raw == S_raw) && (S_raw > value_t(kClampMin))) ? value_t(1) : value_t(0);
       const value_t inv_S = value_t(1) / S;
       const value_t inv_S_sq = inv_S * inv_S;
 
@@ -259,6 +288,10 @@ void sdlinoss_imex2_backward_cuda(const at::Tensor& A,
                                   at::Tensor& grad_step,
                                   at::Tensor& grad_bu) {
   c10::cuda::OptionalCUDAGuard device_guard{bu.device()};
+
+  grad_A.zero_();
+  grad_G.zero_();
+  grad_step.zero_();
 
   const auto batch = bu.size(1);
   const auto ssm = bu.size(2);

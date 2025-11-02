@@ -192,6 +192,59 @@ def test_cpu_kernels_accept_broadcast_views(shape_kind: str, variant: str) -> No
     torch.testing.assert_close(out_kernel, out_ref, atol=1e-6, rtol=1e-6)
 
 
+@pytest.mark.cuda
+@pytest.mark.parametrize("variant", ["imex1", "imex2", "im", "ex"])
+def test_cuda_kernel_matches_reference_forward_and_backward(variant: str) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    if not _sdlinoss_scan.has_kernels(variant):
+        pytest.skip("Selective D-LinOSS CUDA kernels unavailable")
+
+    seed_all(123)
+    device = torch.device("cuda")
+    L, B, M = 32, 4, 16
+
+    dtype_r = torch.float32
+    dtype_c = torch.complex64
+
+    base_A = torch.randn(L, B, M, device=device, dtype=dtype_r).abs() * 50.0
+    base_G = torch.randn(L, B, M, device=device, dtype=dtype_r)
+    base_step = torch.rand(L, B, M, device=device, dtype=dtype_r) * 0.98 + 0.02
+    base_bu = torch.randn(L, B, M, device=device, dtype=dtype_c)
+
+    A_kernel = base_A.clone().requires_grad_(True)
+    G_kernel = base_G.clone().requires_grad_(True)
+    step_kernel = base_step.clone().requires_grad_(True)
+    bu_kernel = base_bu.clone().requires_grad_(True)
+
+    out_kernel = run_sdlinoss(variant, A_kernel, G_kernel, step_kernel, bu_kernel)
+    loss_kernel = out_kernel.real.square().mean() + out_kernel.imag.square().mean()
+    loss_kernel.backward()
+
+    kernel_grads = (
+        A_kernel.grad.detach().clone(),
+        G_kernel.grad.detach().clone(),
+        step_kernel.grad.detach().clone(),
+        bu_kernel.grad.detach().clone(),
+    )
+
+    A_ref = base_A.clone().requires_grad_(True)
+    G_ref = base_G.clone().requires_grad_(True)
+    step_ref = base_step.clone().requires_grad_(True)
+    bu_ref = base_bu.clone().requires_grad_(True)
+
+    states_ref = _sdlinoss_scan._reference_sdlinoss_states(variant, A_ref, G_ref, step_ref, bu_ref)
+    out_ref = states_ref[..., 1]
+    loss_ref = out_ref.real.square().mean() + out_ref.imag.square().mean()
+    loss_ref.backward()
+
+    torch.testing.assert_close(out_kernel, out_ref, atol=1e-5, rtol=1e-5)
+
+    ref_grads = (A_ref.grad, G_ref.grad, step_ref.grad, bu_ref.grad)
+    for grad_kernel, grad_ref in zip(kernel_grads, ref_grads):
+        torch.testing.assert_close(grad_kernel, grad_ref, atol=1e-5, rtol=1e-4)
+
+
 def test_eigenvalue_magnitude_matches_r_and_contraction_law() -> None:
     seed_all(3)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

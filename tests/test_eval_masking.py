@@ -40,10 +40,25 @@ def test_evaluate_fullsort_masks_history() -> None:
     assert metrics["HR@1"] == 0.0
 
 
-def test_evaluate_fullsort_raises_when_topk_exceeds_candidates() -> None:
+def test_evaluate_fullsort_skips_examples_with_no_candidates(caplog: pytest.LogCaptureFixture) -> None:
     dataset = _ToyDataset()
     loader = DataLoader(dataset, batch_size=1, collate_fn=partial(collate_left_pad, max_len=4))
     model = _DummyModel()
-    seen_items = {0: torch.tensor([1, 2])}
-    with pytest.raises(RuntimeError, match="candidate pool is smaller"):
-        evaluate_fullsort(model, loader, seen_items, torch.device("cpu"), topk=5)
+    seen_items = {0: torch.tensor([1, 2, 3])}
+    with caplog.at_level("WARNING"):
+        metrics = evaluate_fullsort(model, loader, seen_items, torch.device("cpu"), topk=5)
+    assert metrics["HR@5"] == 0.0
+    assert "Skipped" in caplog.text
+
+
+def test_evaluate_fullsort_clamps_topk_when_candidates_limited(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    dataset = _ToyDataset()
+    loader = DataLoader(dataset, batch_size=1, collate_fn=partial(collate_left_pad, max_len=4))
+    model = _DummyModel()
+    seen_items = {0: torch.tensor([], dtype=torch.long)}
+    with caplog.at_level("INFO"):
+        metrics = evaluate_fullsort(model, loader, seen_items, torch.device("cpu"), topk=5)
+    assert metrics["HR@5"] == 1.0
+    assert "Effective evaluation top-k clipped" in caplog.text

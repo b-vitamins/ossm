@@ -53,10 +53,10 @@ class SelectiveDLinOSSLayer(nn.Module):
         r_max: float = 1.0,
         theta_min: float = 0.0,
         theta_max: float = math.pi,
-        A_min: float = 0.0,
-        A_max: float = 1.0,
-        G_min: float = 0.0,
-        G_max: float = 1.0,
+        A_min: float = -1.0e4,
+        A_max: float = 1.0e4,
+        G_min: float = -1.0e4,
+        G_max: float = 1.0e4,
         dt_std: float = 0.5,
         selective_injection: bool = True,
         per_step_dt: bool = False,
@@ -180,16 +180,17 @@ class SelectiveDLinOSSLayer(nn.Module):
         r = torch.sigmoid(base_r + delta_r).to(dtype=compute_dtype)
         theta = (math.pi * torch.tanh(base_th + delta_th)).to(dtype=compute_dtype)
 
-        dt_floor = 0.02
+        dt_floor = 0.05 if self.variant == "imex2" else 0.02
         if self.dt_head is None:
             raw_dt = torch.sigmoid(self.dt_base).view(1, 1, -1).expand(B, L, self.ssm_size)
         else:
             raw_dt = torch.sigmoid(self.dt_base.view(1, 1, -1) + self.dt_head(feats))
+        raw_dt = torch.nan_to_num(raw_dt, nan=0.5, posinf=1.0, neginf=0.0)
         dt = (dt_floor + (1.0 - dt_floor) * raw_dt).to(dtype=compute_dtype)
 
         r2 = torch.clamp(r * r, min=1e-8)
         cos_t = torch.cos(theta)
-        dtc = torch.clamp(dt, min=1e-6)
+        dtc = torch.nan_to_num(dt, nan=1e-3).clamp(min=1e-6)
         if self.variant == "imex1":
             A = (r2 - 2.0 * r * cos_t + 1.0) / (dtc * dtc * r2)
             G = (1.0 - r2) / (dtc * r2)
@@ -202,6 +203,13 @@ class SelectiveDLinOSSLayer(nn.Module):
         else:
             A = (r2 - 2.0 * r * cos_t + 1.0) / (dtc * dtc)
             G = (2.0 - 2.0 * r * cos_t) / dtc
+
+        A = torch.nan_to_num(A, nan=0.0, posinf=1e6, neginf=-1e6)
+        G = torch.nan_to_num(G, nan=0.0, posinf=1e6, neginf=-1e6)
+        if self.cfg.A_min <= self.cfg.A_max:
+            A = A.clamp(min=self.cfg.A_min, max=self.cfg.A_max)
+        if self.cfg.G_min <= self.cfg.G_max:
+            G = G.clamp(min=self.cfg.G_min, max=self.cfg.G_max)
 
         B_complex = torch.view_as_complex(
             self.B.to(dtype=scan_real_dtype)
@@ -220,10 +228,17 @@ class SelectiveDLinOSSLayer(nn.Module):
             gate = torch.sigmoid(base + self.inj_head(feats)).to(dtype=scan_real_dtype)
             bu = bu * gate.to(dtype=bu.dtype)
 
-        A_seq = A.to(dtype=scan_real_dtype).permute(1, 0, 2).contiguous()
-        G_seq = G.to(dtype=scan_real_dtype).permute(1, 0, 2).contiguous()
-        dt_seq = dtc.to(dtype=scan_real_dtype).permute(1, 0, 2).contiguous()
-        bu_seq = bu.to(dtype=scan_complex_dtype).permute(1, 0, 2).contiguous()
+        def _nan_to_num_complex(tensor: Tensor, *, fill: float = 0.0) -> Tensor:
+            real = torch.nan_to_num(tensor.real, nan=fill, posinf=fill, neginf=-fill)
+            imag = torch.nan_to_num(tensor.imag, nan=fill, posinf=fill, neginf=-fill)
+            return torch.complex(real, imag)
+
+        bu = _nan_to_num_complex(bu, fill=0.0)
+
+        A_seq = torch.nan_to_num(A, nan=0.0, posinf=1e6, neginf=-1e6).to(dtype=scan_real_dtype).permute(1, 0, 2).contiguous()
+        G_seq = torch.nan_to_num(G, nan=0.0, posinf=1e6, neginf=-1e6).to(dtype=scan_real_dtype).permute(1, 0, 2).contiguous()
+        dt_seq = torch.nan_to_num(dtc, nan=1e-3, posinf=1.0, neginf=1e-6).to(dtype=scan_real_dtype).permute(1, 0, 2).contiguous()
+        bu_seq = _nan_to_num_complex(bu, fill=0.0).to(dtype=scan_complex_dtype).permute(1, 0, 2).contiguous()
 
         with autocast("cuda", enabled=False):
             x_seq = run_sdlinoss(self.variant, A_seq, G_seq, dt_seq, bu_seq)

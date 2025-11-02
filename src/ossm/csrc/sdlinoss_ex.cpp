@@ -17,8 +17,10 @@ template <typename scalar_t>
 inline typename ComplexTraits<scalar_t>::value_t clamp_step(
     typename ComplexTraits<scalar_t>::value_t raw) {
   using value_t = typename ComplexTraits<scalar_t>::value_t;
-  const value_t clamped = std::min(std::max(raw, value_t(kDtMin)), value_t(kDtMax));
-  return clamped;
+  if (std::isnan(raw)) {
+    return value_t(kDtMin);
+  }
+  return std::min(std::max(raw, value_t(kDtMin)), value_t(kDtMax));
 }
 
 template <typename scalar_t>
@@ -50,8 +52,14 @@ void sdlinoss_ex_forward_cpu_kernel(
 
       for (int64_t t = 0; t < length; ++t) {
         const int64_t offset = t * series + idx;
-        const value_t a_t = A[offset];
-        const value_t g_t = G[offset];
+        value_t a_t = A[offset];
+        value_t g_t = G[offset];
+        if (std::isnan(a_t)) {
+          a_t = value_t(0);
+        }
+        if (std::isnan(g_t)) {
+          g_t = value_t(0);
+        }
         const value_t step_raw = step[offset];
         const value_t dt = clamp_step<scalar_t>(step_raw);
 
@@ -96,7 +104,8 @@ void sdlinoss_ex_backward_cpu_kernel(
     typename ComplexTraits<scalar_t>::value_t* __restrict__ grad_step_ptr,
     int64_t length,
     int64_t batch,
-    int64_t ssm) {
+    int64_t ssm,
+    bool allow_parallel) {
   using traits = ComplexTraits<scalar_t>;
   using value_t = typename traits::value_t;
 
@@ -107,7 +116,7 @@ void sdlinoss_ex_backward_cpu_kernel(
   const int64_t series = batch * ssm;
   const int64_t step_stride = series * 2;
 
-  at::parallel_for(0, series, 1, [&](int64_t begin, int64_t end) {
+  auto loop_body = [&](int64_t begin, int64_t end) {
     for (int64_t idx = begin; idx < end; ++idx) {
       value_t grad_w_next_real = value_t(0);
       value_t grad_w_next_imag = value_t(0);
@@ -145,12 +154,19 @@ void sdlinoss_ex_backward_cpu_kernel(
         value_t grad_w_new_real = grad_w_next_real;
         value_t grad_w_new_imag = grad_w_next_imag;
 
-        const value_t a_t = A[offset];
-        const value_t g_t = G[offset];
+        value_t a_t = A[offset];
+        value_t g_t = G[offset];
+        if (std::isnan(a_t)) {
+          a_t = value_t(0);
+        }
+        if (std::isnan(g_t)) {
+          g_t = value_t(0);
+        }
         const value_t step_raw = step[offset];
         const value_t dt = clamp_step<scalar_t>(step_raw);
-        const value_t step_mask =
-            (step_raw > value_t(kDtMin) && step_raw < value_t(kDtMax)) ? value_t(1) : value_t(0);
+        const value_t step_mask = (!std::isnan(step_raw) && step_raw > value_t(kDtMin) && step_raw < value_t(kDtMax))
+                                      ? value_t(1)
+                                      : value_t(0);
         const value_t dt2 = dt * dt;
         const value_t alpha = value_t(1) - dt * g_t;
 
@@ -199,7 +215,13 @@ void sdlinoss_ex_backward_cpu_kernel(
         grad_x_next_imag = grad_x_prev_imag;
       }
     }
-  });
+  };
+
+  if (allow_parallel && series > 0) {
+    at::parallel_for(0, series, 1, loop_body);
+  } else {
+    loop_body(0, series);
+  }
 }
 
 #ifdef WITH_CUDA
@@ -258,7 +280,8 @@ void sdlinoss_ex_backward_cpu(const at::Tensor& A,
                               at::Tensor& grad_A,
                               at::Tensor& grad_G,
                               at::Tensor& grad_step,
-                              at::Tensor& grad_bu) {
+                              at::Tensor& grad_bu,
+                              bool allow_parallel) {
   const auto length = bu.size(0);
   const auto batch = bu.size(1);
   const auto ssm = bu.size(2);
@@ -277,7 +300,8 @@ void sdlinoss_ex_backward_cpu(const at::Tensor& A,
         grad_step.data_ptr<typename ComplexTraits<scalar_t>::value_t>(),
         length,
         batch,
-        ssm);
+        ssm,
+        allow_parallel);
   });
 }
 
@@ -375,6 +399,14 @@ std::vector<at::Tensor> sdlinoss_ex_backward(const at::Tensor& A,
     auto grad_step_buffer = at::zeros({length, batch, ssm}, step.options());
     grad_bu = at::empty_like(bu);
 
+    const bool reduce_A =
+        ((A_view.size(0) == 1 && length > 1) || (A_view.size(1) == 1 && batch > 1));
+    const bool reduce_G =
+        ((G_view.size(0) == 1 && length > 1) || (G_view.size(1) == 1 && batch > 1));
+    const bool reduce_step =
+        ((step_view.size(0) == 1 && length > 1) || (step_view.size(1) == 1 && batch > 1));
+    const bool needs_reduction = reduce_A || reduce_G || reduce_step;
+
     sdlinoss_ex_backward_cpu(A_broadcast,
                              G_broadcast,
                              step_broadcast,
@@ -384,7 +416,8 @@ std::vector<at::Tensor> sdlinoss_ex_backward(const at::Tensor& A,
                              grad_A_buffer,
                              grad_G_buffer,
                              grad_step_buffer,
-                             grad_bu);
+                             grad_bu,
+                             !needs_reduction);
 
     grad_A = reduce_broadcast_grad(grad_A_buffer, A_view, length, batch).reshape(A.sizes());
     grad_G = reduce_broadcast_grad(grad_G_buffer, G_view, length, batch).reshape(G.sizes());

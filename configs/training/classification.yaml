@@ -3,7 +3,7 @@ max_steps: 100000
 epochs: null
 log_interval: 1000
 eval_interval: 5000
-grad_clip: null
+grad_clip: 1.0
 classification: true
 metric: accuracy
 checkpoint_dir: ${paths.work_dir}
