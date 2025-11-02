@@ -194,9 +194,15 @@ def _reference_sdlinoss_states_from_views(
             aux = (aux + (dt_t * dt_t) * comb) / S
             x = x + aux
         elif variant == "imex2":
+            # Evolve IMEX2 in terms of w := dt * z for improved conditioning.
+            # Recurrence:
+            #   S = 1 + dt^2 * A
+            #   w_{t+1} = ((1 - dt * G) * w_t + dt^2 * (-A * x_t + bu_t)) / S
+            #   x_{t+1} = x_t + w_{t+1}
             S = torch.clamp(1.0 + (dt_t * dt_t) * a_t, min=1e-6)
-            aux = (aux + dt_t * (-a_t * x - g_t * aux + bu_t)) / S
-            x = x + dt_t * aux
+            comb = -a_t * x + bu_t
+            aux = ((1.0 - dt_t * g_t) * aux + (dt_t * dt_t) * comb) / S
+            x = x + aux
         elif variant == "im":
             S = torch.clamp(1.0 + dt_t * g_t + (dt_t * dt_t) * a_t, min=1e-6)
             comb = -a_t * x + bu_t
@@ -444,4 +450,3 @@ def run_sdlinoss(variant: str, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu:
 
     with autocast("cuda", enabled=False):
         return cast(Tensor, fn.apply(A_ctg, G_ctg, step_ctg, bu_ctg))
-

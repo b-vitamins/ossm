@@ -356,4 +356,3 @@ class SelectiveDLinOSSBackbone(Backbone):
             features = block(features)
         pooled = features.mean(dim=1)
         return SequenceBackboneOutput(features=features, pooled=pooled)
-
