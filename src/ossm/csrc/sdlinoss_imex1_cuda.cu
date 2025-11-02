@@ -336,7 +336,7 @@ __global__ void sdlinoss_forward_scan_summaries_kernel(
   for (int64_t t = 0; t < ntiles; ++t) {
     tile_prefix[base + t] = prefix;
     const auto cur = tile_summ[base + t];
-    prefix = pair_combine(cur, prefix);
+    prefix = pair_combine(prefix, cur);
   }
 }
 
