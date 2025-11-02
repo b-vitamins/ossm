@@ -7,7 +7,11 @@
 #include "dlinoss_common.h"
 
 namespace ossm {
-constexpr int kTile = 1024;
+// Keep the tile small enough that the per-block shared memory fits on devices
+// with a 48 KB limit (e.g., most sm70/sm75 parts). Each thread stores exactly
+// one `Pair2x2` in shared memory, so the tile size must account for the
+// `complex128` case where a single pair consumes 64 bytes.
+constexpr int kTile = 256;
 constexpr int kThreads = kTile;
 
 using cub::BlockScan;
@@ -71,7 +75,6 @@ __global__ void sdlinoss_imex1_forward_tile_kernel(
   }
 
   __shared__ Pair2x2<real_t, scalar_t> sh_pairs[kTile];
-  __shared__ Pair2x2<real_t, scalar_t> sh_scan[kTile];
 
   Pair2x2<real_t, scalar_t> p = pair_identity<real_t, scalar_t>();
 
@@ -104,11 +107,11 @@ __global__ void sdlinoss_imex1_forward_tile_kernel(
     sh_pairs[t_in_tile] = acc;
     __syncthreads();
   }
-  sh_scan[t_in_tile] = acc;
+  sh_pairs[t_in_tile] = acc;
   __syncthreads();
 
   if (t < length) {
-    const Pair2x2<real_t, scalar_t> s = sh_scan[t_in_tile];
+    const Pair2x2<real_t, scalar_t> s = sh_pairs[t_in_tile];
     const int64_t out_off = static_cast<int64_t>(t) * step_stride + series_idx * 2;
     tmp_states[out_off + 0] = s.f1;
     tmp_states[out_off + 1] = s.f2;
@@ -125,7 +128,7 @@ __global__ void sdlinoss_imex1_forward_tile_kernel(
       span64 = kTile;
     }
     const int last = static_cast<int>(span64 - 1);
-    tile_summ[idx_tile] = sh_scan[last];
+    tile_summ[idx_tile] = sh_pairs[last];
   }
 }
 
