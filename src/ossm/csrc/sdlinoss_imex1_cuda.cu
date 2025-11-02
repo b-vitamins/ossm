@@ -319,6 +319,60 @@ __global__ void sdlinoss_imex1_backward_kernel(
   }
 }
 
+template <typename scalar_t>
+__global__ void sdlinoss_forward_scan_summaries_kernel(
+    const Pair2x2<typename ComplexTraits<scalar_t>::real_t, scalar_t>* __restrict__ tile_summ,
+    Pair2x2<typename ComplexTraits<scalar_t>::real_t, scalar_t>* __restrict__ tile_prefix,
+    int64_t ntiles,
+    int64_t series) {
+  using real_t = typename ComplexTraits<scalar_t>::real_t;
+  const int s = blockIdx.x * blockDim.x + threadIdx.x;
+  if (s >= series) {
+    return;
+  }
+
+  const int64_t base = static_cast<int64_t>(s) * ntiles;
+  auto prefix = pair_identity<real_t, scalar_t>();
+  for (int64_t t = 0; t < ntiles; ++t) {
+    tile_prefix[base + t] = prefix;
+    const auto cur = tile_summ[base + t];
+    prefix = pair_combine(cur, prefix);
+  }
+}
+
+template <typename scalar_t>
+__global__ void sdlinoss_forward_fixup_kernel(
+    const Pair2x2<typename ComplexTraits<scalar_t>::real_t, scalar_t>* __restrict__ tile_prefix,
+    scalar_t* __restrict__ tmp_states,
+    int64_t length,
+    int64_t batch,
+    int64_t ssm,
+    int64_t ntiles) {
+  const int64_t series_n = batch * ssm;
+  const int series = blockIdx.x;
+  const int tile_id = blockIdx.y;
+  const int t_in_tile = threadIdx.x;
+  const int t0 = tile_id * kTile;
+  const int t = t0 + t_in_tile;
+
+  if (series >= series_n || t >= length) {
+    return;
+  }
+
+  const auto prefix = tile_prefix[static_cast<int64_t>(series) * ntiles + tile_id];
+
+  const int64_t step_stride = series_n * 2;
+  const int64_t off = static_cast<int64_t>(t) * step_stride + series * 2;
+
+  scalar_t z = tmp_states[off + 0];
+  scalar_t x = tmp_states[off + 1];
+  scalar_t z_out;
+  scalar_t x_out;
+  pair_apply_state(prefix, z, x, z_out, x_out);
+  tmp_states[off + 0] = z_out;
+  tmp_states[off + 1] = x_out;
+}
+
 }  // namespace
 
 void sdlinoss_imex1_forward_scan_cuda(const at::Tensor& A,
@@ -352,6 +406,51 @@ void sdlinoss_imex1_forward_scan_cuda(const at::Tensor& A,
         bu.size(2));
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void sdlinoss_imex1_forward_scan_finish_cuda(const at::Tensor& tile_summ,
+                                             at::Tensor& tile_prefix,
+                                             at::Tensor& tmp_states,
+                                             int64_t L,
+                                             int64_t B,
+                                             int64_t N) {
+  c10::cuda::OptionalCUDAGuard device_guard{tmp_states.device()};
+
+  const int64_t series = B * N;
+  const int64_t ntiles = (L + kTile - 1) / kTile;
+  if (series == 0 || ntiles == 0) {
+    return;
+  }
+
+  {
+    dim3 block(256);
+    dim3 grid((series + block.x - 1) / block.x);
+    AT_DISPATCH_COMPLEX_TYPES(tmp_states.scalar_type(), "sdlinoss_scan_summaries", [&] {
+      using real_t = typename ComplexTraits<scalar_t>::real_t;
+      sdlinoss_forward_scan_summaries_kernel<scalar_t><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+          reinterpret_cast<const Pair2x2<real_t, scalar_t>*>(tile_summ.data_ptr()),
+          reinterpret_cast<Pair2x2<real_t, scalar_t>*>(tile_prefix.data_ptr()),
+          ntiles,
+          series);
+    });
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+
+  {
+    dim3 grid(series, ntiles, 1);
+    dim3 block(kTile, 1, 1);
+    AT_DISPATCH_COMPLEX_TYPES(tmp_states.scalar_type(), "sdlinoss_fixup", [&] {
+      using real_t = typename ComplexTraits<scalar_t>::real_t;
+      sdlinoss_forward_fixup_kernel<scalar_t><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+          reinterpret_cast<const Pair2x2<real_t, scalar_t>*>(tile_prefix.data_ptr()),
+          tmp_states.data_ptr<scalar_t>(),
+          L,
+          B,
+          N,
+          ntiles);
+    });
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
 }
 
 void sdlinoss_imex1_forward_cuda(const at::Tensor& A,
