@@ -1,11 +1,17 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/Exceptions.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <cub/block/block_scan.cuh>
 #include <torch/extension.h>
 
 #include "dlinoss_common.h"
 
 namespace ossm {
+constexpr int kTile = 1024;
+constexpr int kThreads = kTile;
+
+using cub::BlockScan;
+
 namespace {
 
 constexpr double kDtMin = 1e-6;
@@ -23,6 +29,104 @@ template <typename value_t>
 __device__ inline value_t clamp_stability(value_t raw) {
   const value_t lower = static_cast<value_t>(kClampMin);
   return raw < lower ? lower : raw;
+}
+
+template <typename scalar_t>
+struct ComplexTraits;
+template <>
+struct ComplexTraits<c10::complex<float>> {
+  using real_t = float;
+  using vec2_t = float2;
+};
+template <>
+struct ComplexTraits<c10::complex<double>> {
+  using real_t = double;
+  using vec2_t = double2;
+};
+
+template <typename scalar_t>
+__global__ void sdlinoss_imex1_forward_tile_kernel(
+    const typename ComplexTraits<scalar_t>::real_t* __restrict__ A,
+    const typename ComplexTraits<scalar_t>::real_t* __restrict__ G,
+    const typename ComplexTraits<scalar_t>::real_t* __restrict__ step,
+    const scalar_t* __restrict__ bu_ptr,
+    scalar_t* __restrict__ tmp_states,
+    Pair2x2<typename ComplexTraits<scalar_t>::real_t, scalar_t>* __restrict__ tile_summ,
+    int64_t length,
+    int64_t batch,
+    int64_t ssm) {
+  using real_t = typename ComplexTraits<scalar_t>::real_t;
+
+  const int64_t series_n = batch * ssm;
+  const int64_t step_stride = series_n * 2;
+
+  const int series_idx = blockIdx.x;
+  const int tile_id = blockIdx.y;
+  const int t_in_tile = threadIdx.x;
+  const int t0 = tile_id * kTile;
+  const int t = t0 + t_in_tile;
+
+  if (series_idx >= series_n) {
+    return;
+  }
+
+  __shared__ Pair2x2<real_t, scalar_t> sh_pairs[kTile];
+  __shared__ Pair2x2<real_t, scalar_t> sh_scan[kTile];
+
+  Pair2x2<real_t, scalar_t> p = pair_identity<real_t, scalar_t>();
+
+  if (t < length) {
+    const int64_t off = static_cast<int64_t>(t) * series_n + series_idx;
+
+    const real_t a = A[off];
+    const real_t g = G[off];
+    const real_t dt = clamp_step<real_t>(step[off]);
+    const scalar_t bu = bu_ptr[off];
+
+    p = build_pair_imex1<real_t, scalar_t>(a, g, dt, bu);
+  }
+  sh_pairs[t_in_tile] = p;
+  __syncthreads();
+
+  Pair2x2<real_t, scalar_t> acc = sh_pairs[t_in_tile];
+#pragma unroll
+  for (int offset = 1; offset < kTile; offset <<= 1) {
+    Pair2x2<real_t, scalar_t> other;
+    if (t_in_tile >= offset) {
+      other = sh_pairs[t_in_tile - offset];
+    } else {
+      other = pair_identity<real_t, scalar_t>();
+    }
+    __syncthreads();
+    if (t_in_tile >= offset) {
+      acc = pair_combine(other, acc);
+    }
+    sh_pairs[t_in_tile] = acc;
+    __syncthreads();
+  }
+  sh_scan[t_in_tile] = acc;
+  __syncthreads();
+
+  if (t < length) {
+    const Pair2x2<real_t, scalar_t> s = sh_scan[t_in_tile];
+    const int64_t out_off = static_cast<int64_t>(t) * step_stride + series_idx * 2;
+    tmp_states[out_off + 0] = s.f1;
+    tmp_states[out_off + 1] = s.f2;
+  }
+
+  if (t_in_tile == kTile - 1) {
+    const int64_t ntile = (length + kTile - 1) / kTile;
+    const int64_t idx_tile = static_cast<int64_t>(series_idx) * ntile + tile_id;
+    int64_t span64 = length - t0;
+    if (span64 <= 0) {
+      span64 = 1;
+    }
+    if (span64 > kTile) {
+      span64 = kTile;
+    }
+    const int last = static_cast<int>(span64 - 1);
+    tile_summ[idx_tile] = sh_scan[last];
+  }
 }
 
 template <typename scalar_t>
@@ -213,6 +317,39 @@ __global__ void sdlinoss_imex1_backward_kernel(
 }
 
 }  // namespace
+
+void sdlinoss_imex1_forward_scan_cuda(const at::Tensor& A,
+                                      const at::Tensor& G,
+                                      const at::Tensor& step,
+                                      const at::Tensor& bu,
+                                      at::Tensor& tmp_states,
+                                      at::Tensor& tile_summ) {
+  c10::cuda::OptionalCUDAGuard device_guard{bu.device()};
+  const auto series = bu.size(1) * bu.size(2);
+  const auto ntiles = (bu.size(0) + kTile - 1) / kTile;
+
+  if (bu.size(0) == 0 || series == 0 || ntiles == 0) {
+    return;
+  }
+
+  dim3 grid(series, ntiles, 1);
+  dim3 block(kThreads, 1, 1);
+
+  AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "sdlinoss_imex1_forward_tile", [&] {
+    using real_t = typename ComplexTraits<scalar_t>::real_t;
+    sdlinoss_imex1_forward_tile_kernel<scalar_t><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+        A.data_ptr<real_t>(),
+        G.data_ptr<real_t>(),
+        step.data_ptr<real_t>(),
+        bu.data_ptr<scalar_t>(),
+        tmp_states.data_ptr<scalar_t>(),
+        reinterpret_cast<Pair2x2<real_t, scalar_t>*>(tile_summ.data_ptr()),
+        bu.size(0),
+        bu.size(1),
+        bu.size(2));
+  });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 
 void sdlinoss_imex1_forward_cuda(const at::Tensor& A,
                                  const at::Tensor& G,
