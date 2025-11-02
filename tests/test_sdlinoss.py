@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 from typing import Tuple
+import os
+from unittest import mock
 
 import pytest
 import torch
@@ -145,7 +147,10 @@ def test_cuda_kernels_accept_broadcast_views(shape_kind: str, variant: str) -> N
     bu = torch.complex(bu_real, bu_imag)
 
     out_kernel = run_sdlinoss(variant, A, G, D, bu)
-    out_ref = _sdlinoss_scan._fallback_sdlinoss(variant, A_full, G_full, dt_full, bu)
+    # Compare against the Python fallback using the same broadcasted shapes
+    # to ensure both sides evaluate the same parameter field.
+    with mock.patch.dict(os.environ, {"OSSM_SDLINOSS_DISABLE_KERNEL": "1"}):
+        out_ref = run_sdlinoss(variant, A, G, D, bu)
 
     torch.testing.assert_close(out_kernel, out_ref, atol=1e-5, rtol=1e-5)
 
@@ -332,4 +337,3 @@ def test_equivalence_constant_params_vs_time_varying_broadcast() -> None:
         u,
     )
     assert torch.allclose(y_const, y_brdc, atol=1e-6, rtol=1e-5)
-
