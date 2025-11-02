@@ -155,6 +155,32 @@ def test_cuda_kernels_accept_broadcast_views(shape_kind: str, variant: str) -> N
     torch.testing.assert_close(out_kernel, out_ref, atol=1e-5, rtol=1e-5)
 
 
+def test_cuda_imex1_scan_matches_fallback_for_long_sequences() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    if not _sdlinoss_scan.has_kernels("imex1"):
+        pytest.skip("Selective D-LinOSS CUDA kernels unavailable")
+
+    seed_all(123)
+    device = torch.device("cuda")
+
+    L, B, M = 300, 2, 4
+    r = torch.rand(L, B, M, device=device) * 0.7 + 0.2
+    theta = (torch.rand(L, B, M, device=device) * 2 - 1) * math.pi
+    dt = torch.sigmoid(torch.randn(L, B, M, device=device)) * 0.9 + 0.05
+    A, G = make_stable_AG_from_rt(r, theta, dt)
+
+    bu_real = torch.randn(L, B, M, device=device)
+    bu_imag = torch.randn(L, B, M, device=device)
+    bu = torch.complex(bu_real, bu_imag)
+
+    out_kernel = run_sdlinoss("imex1", A, G, dt, bu)
+    with mock.patch.dict(os.environ, {"OSSM_SDLINOSS_DISABLE_KERNEL": "1"}):
+        out_ref = run_sdlinoss("imex1", A, G, dt, bu)
+
+    torch.testing.assert_close(out_kernel, out_ref, atol=1e-5, rtol=1e-5)
+
+
 @pytest.mark.parametrize("variant", ["imex1", "imex2", "im", "ex"])
 @pytest.mark.parametrize("shape_kind", ["M", "LM", "BM", "LBM"])
 def test_cpu_kernels_accept_broadcast_views(shape_kind: str, variant: str) -> None:

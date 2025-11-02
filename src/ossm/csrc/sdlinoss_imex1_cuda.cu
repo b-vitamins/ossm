@@ -459,32 +459,38 @@ void sdlinoss_imex1_forward_cuda(const at::Tensor& A,
                                  const at::Tensor& bu,
                                  at::Tensor& output) {
   c10::cuda::OptionalCUDAGuard device_guard{bu.device()};
+  const auto L = bu.size(0);
+  const auto B = bu.size(1);
+  const auto N = bu.size(2);
+  const auto series = B * N;
 
-  const auto batch = bu.size(1);
-  const auto ssm = bu.size(2);
-  const auto series = batch * ssm;
+  int64_t pair_bytes = 0;
+  if (bu.scalar_type() == at::kComplexFloat) {
+    pair_bytes = static_cast<int64_t>(sizeof(Pair2x2<float, c10::complex<float>>));
+  } else if (bu.scalar_type() == at::kComplexDouble) {
+    pair_bytes = static_cast<int64_t>(sizeof(Pair2x2<double, c10::complex<double>>));
+  } else {
+    TORCH_CHECK(false, "sdlinoss_imex1_forward_cuda: expected complex64 or complex128 input");
+  }
 
-  constexpr int64_t threads = 256;
-  const int64_t blocks = std::max<int64_t>(
-      1, std::min<int64_t>((series + threads - 1) / threads, at::cuda::getCurrentDeviceProperties()->maxGridSize[0]));
+  if (L <= kTile) {
+    at::Tensor tmp = at::empty_like(output);
+    const auto ntiles = int64_t{1};
+    at::Tensor tile_summ = at::empty({series * ntiles * pair_bytes}, output.options().dtype(at::kByte));
+    sdlinoss_imex1_forward_scan_cuda(A, G, step, bu, tmp, tile_summ);
+    output.copy_(tmp);
+    return;
+  }
 
-  AT_DISPATCH_COMPLEX_TYPES(bu.scalar_type(), "sdlinoss_imex1_forward_cuda", [&] {
-    const auto length = bu.size(0);
-    const auto A_strided = make_strided3<typename scalar_t::value_type>(A, length, batch, ssm);
-    const auto G_strided = make_strided3<typename scalar_t::value_type>(G, length, batch, ssm);
-    const auto step_strided = make_strided3<typename scalar_t::value_type>(step, length, batch, ssm);
-    const auto bu_strided = make_strided3<scalar_t>(bu, length, batch, ssm);
-    sdlinoss_imex1_forward_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-        A_strided,
-        G_strided,
-        step_strided,
-        bu_strided,
-        output.data_ptr<scalar_t>(),
-        length,
-        batch,
-        ssm);
-  });
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  at::Tensor tmp = at::empty_like(output);
+  const auto ntiles = (L + kTile - 1) / kTile;
+  at::Tensor tile_summ = at::empty({series * ntiles * pair_bytes}, output.options().dtype(at::kByte));
+  at::Tensor tile_prefix = at::empty({series * ntiles * pair_bytes}, output.options().dtype(at::kByte));
+
+  sdlinoss_imex1_forward_scan_cuda(A, G, step, bu, tmp, tile_summ);
+  sdlinoss_imex1_forward_scan_finish_cuda(tile_summ, tile_prefix, tmp, L, B, N);
+
+  output.copy_(tmp);
 }
 
 void sdlinoss_imex1_backward_cuda(const at::Tensor& A,
