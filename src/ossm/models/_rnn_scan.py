@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Optional
+import os
 
 from torch import Tensor
 
@@ -28,6 +29,9 @@ def try_run_linear_rnn_scan(
 
     if inputs.numel() == 0:
         return inputs.new_empty((0, inputs.size(1), weight_hh.size(0)))
+    # Allow disabling the kernel at runtime (stability/perf variability across envs)
+    if os.environ.get("OSSM_DISABLE_RNN_KERNEL") == "1":
+        return None
     if _kernels is None:
         return None
 
