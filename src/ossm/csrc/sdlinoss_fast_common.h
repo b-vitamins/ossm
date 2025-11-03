@@ -17,12 +17,24 @@ C10_HOST_DEVICE inline T fma_val(T a, T b, T c) {
 
 template <>
 C10_HOST_DEVICE inline float fma_val<float>(float a, float b, float c) {
-  return ::fmaf(a, b, c);
+  return
+#if defined(__CUDA_ARCH__)
+      ::fmaf
+#else
+      std::fma
+#endif
+      (a, b, c);
 }
 
 template <>
 C10_HOST_DEVICE inline double fma_val<double>(double a, double b, double c) {
-  return ::fma(a, b, c);
+  return
+#if defined(__CUDA_ARCH__)
+      ::fma
+#else
+      std::fma
+#endif
+      (a, b, c);
 }
 
 template <typename value_t>
