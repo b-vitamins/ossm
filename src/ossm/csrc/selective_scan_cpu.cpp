@@ -103,12 +103,10 @@ at::Tensor selective_scan_cpu(const at::Tensor& inputs,
   }
 
   auto output = at::empty_like(x);
-  auto invA = 1.0f / A_contig;
 
   const float* x_ptr = x.data_ptr<float>();
   const float* dt_ptr = dt_contig.data_ptr<float>();
   const float* A_ptr = A_contig.data_ptr<float>();
-  const float* invA_ptr = invA.data_ptr<float>();
   const float* B_ptr = B_contig.data_ptr<float>();
   const float* C_ptr = C_contig.data_ptr<float>();
   const float* gate_ptr = gate.has_value() ? gate_contig.data_ptr<float>() : nullptr;
@@ -128,7 +126,6 @@ at::Tensor selective_scan_cpu(const at::Tensor& inputs,
       const int64_t c = bc % channels;
 
       const float* A_row = A_ptr + c * state_dim;
-      const float* invA_row = invA_ptr + c * state_dim;
 
       const float* x_lane = x_ptr + (static_cast<int64_t>(b) * channels + c) * length;
       const float* dt_lane = dt_ptr + (static_cast<int64_t>(b) * channels + c) * length;
@@ -148,12 +145,9 @@ at::Tensor selective_scan_cpu(const at::Tensor& inputs,
 #pragma omp simd reduction(+ : accumulator)
         for (int64_t n = 0; n < state_dim; ++n) {
           const float a = A_row[n];
-          const float inv_a = invA_row[n];
           const float delta = dt_scalar * a;
           const float A_bar = static_cast<float>(std::exp(delta));
-          const float phi = static_cast<float>(std::expm1(delta)) * inv_a;
-          const float updated =
-              std::fmaf(phi * B_step[n], input_scalar, A_bar * state[n]);
+          const float updated = std::fmaf(dt_scalar * B_step[n], input_scalar, A_bar * state[n]);
           state[n] = updated;
           accumulator += updated * C_step[n];
         }
@@ -235,7 +229,6 @@ std::vector<at::Tensor> selective_scan_cpu_backward(
 
   at::parallel_for(0, batch * channels, 0, [&](int64_t begin, int64_t end) {
     std::vector<float> A_row(static_cast<std::size_t>(state_dim));
-    std::vector<float> invA_row(static_cast<std::size_t>(state_dim));
     std::vector<float> lane_state(static_cast<std::size_t>(length) * state_dim);
     std::vector<float> grad_state(static_cast<std::size_t>(state_dim));
 
@@ -267,7 +260,6 @@ std::vector<at::Tensor> selective_scan_cpu_backward(
       for (int64_t n = 0; n < state_dim; ++n) {
         const float a = A_row_ptr[n];
         A_row[static_cast<std::size_t>(n)] = a;
-        invA_row[static_cast<std::size_t>(n)] = 1.0f / a;
       }
 
       std::fill(grad_state.begin(), grad_state.end(), 0.0f);
@@ -282,14 +274,12 @@ std::vector<at::Tensor> selective_scan_cpu_backward(
 #pragma omp simd
         for (int64_t n = 0; n < state_dim; ++n) {
           const float a = A_row[static_cast<std::size_t>(n)];
-          const float inv_a = invA_row[static_cast<std::size_t>(n)];
           const float prev = (t == 0) ? 0.0f
                                       : lane_state[base_index - state_dim + n];
           const float delta = dt_scalar * a;
           const float A_bar = static_cast<float>(std::exp(delta));
-          const float phi = static_cast<float>(std::expm1(delta)) * inv_a;
           const float updated =
-              std::fmaf(phi * B_step[n], input_scalar, A_bar * prev);
+              std::fmaf(dt_scalar * B_step[n], input_scalar, A_bar * prev);
           lane_state[base_index + static_cast<std::size_t>(n)] = updated;
         }
       }
@@ -322,7 +312,6 @@ std::vector<at::Tensor> selective_scan_cpu_backward(
 
         for (int64_t n = 0; n < state_dim; ++n) {
           const float a = A_row[static_cast<std::size_t>(n)];
-          const float inv_a = invA_row[static_cast<std::size_t>(n)];
           const float state_t = lane_state[base_index + static_cast<std::size_t>(n)];
           const float state_prev =
               (t == 0) ? 0.0f
@@ -333,7 +322,6 @@ std::vector<at::Tensor> selective_scan_cpu_backward(
 
           const float delta = dt_scalar * a;
           const float A_bar = static_cast<float>(std::exp(delta));
-          const float phi = static_cast<float>(std::expm1(delta)) * inv_a;
 
           float grad_state_accum =
               grad_state[static_cast<std::size_t>(n)] + grad_y_gated * C_step[n];
@@ -344,22 +332,18 @@ std::vector<at::Tensor> selective_scan_cpu_backward(
 #pragma omp atomic
           grad_C_ptr[(static_cast<int64_t>(b) * length + t) * state_dim + n] += grad_C;
 
-          const float grad_B = grad_state_accum * phi * input_scalar;
+          const float grad_B = grad_state_accum * dt_scalar * input_scalar;
 #pragma omp atomic
           grad_B_ptr[(static_cast<int64_t>(b) * length + t) * state_dim + n] += grad_B;
 
-          grad_input += grad_state_accum * phi * B_step[n];
+          grad_input += grad_state_accum * dt_scalar * B_step[n];
 
-          const float grad_E = grad_state_accum * state_prev;
-          const float grad_phi = grad_state_accum * B_step[n] * input_scalar;
-          const float grad_delta =
-              grad_E * A_bar + grad_phi * (A_bar * inv_a);
-
-          const float grad_A_update = grad_delta * dt_scalar - grad_phi * phi * inv_a;
+          const float grad_A_update = grad_state_accum * (dt_scalar * A_bar * state_prev);
 
 #pragma omp atomic
           grad_A_ptr[c * state_dim + n] += grad_A_update;
-          grad_dt_scalar += grad_delta * a;
+          grad_dt_scalar +=
+              grad_state_accum * (a * A_bar * state_prev + B_step[n] * input_scalar);
         }
 
         grad_x_lane[t] = grad_input;

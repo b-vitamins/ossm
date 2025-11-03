@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.testing import assert_close
 
-from ossm.models.mambarec import _MambaMixer, _selective_scan_discretized
+from ossm.models.mambarec import _MambaMixer, _selective_scan_mamba
 
 
 def _naive_selective_scan(
@@ -37,15 +37,13 @@ def _naive_selective_scan(
 
         dA = dt_t * A_matrix
         A_bar = torch.exp(dA)
-        phi = torch.expm1(dA) / A_matrix
-
-        state = (A_bar * state) + (phi * B_step) * u_t
+        state = (A_bar * state) + (dt_t * B_step) * u_t
         outputs.append(torch.einsum("bcn,bn->bc", state, C_step))
 
     return torch.stack(outputs, dim=-1).to(dtype=inputs.dtype)
 
 
-def test_selective_scan_discretized_matches_naive() -> None:
+def test_selective_scan_mamba_matches_naive() -> None:
     torch.manual_seed(0)
     batch, channels, seqlen, state = 2, 3, 5, 4
 
@@ -55,7 +53,7 @@ def test_selective_scan_discretized_matches_naive() -> None:
     B_t = torch.randn(batch, seqlen, state, dtype=inputs.dtype)
     C_t = torch.randn(batch, seqlen, state, dtype=inputs.dtype)
 
-    actual = _selective_scan_discretized(inputs, dt, A, B_t, C_t)
+    actual = _selective_scan_mamba(inputs, dt, A, B_t, C_t)
     expected = _naive_selective_scan(inputs, dt, A, B_t, C_t)
 
     assert_close(actual, expected, atol=1e-5, rtol=1e-5)
@@ -94,7 +92,7 @@ def test_mamba_mixer_fallback_matches_fused() -> None:
         C: torch.Tensor,
         gate: torch.Tensor | None,
     ) -> torch.Tensor:
-        outputs = _selective_scan_discretized(inputs, dt, A, B, C)
+        outputs = _selective_scan_mamba(inputs, dt, A, B, C)
         if gate is None:
             return outputs
         return outputs * F.silu(gate)

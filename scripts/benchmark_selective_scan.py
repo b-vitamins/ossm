@@ -14,7 +14,7 @@ from ossm.models._selective_scan import (
     has_kernels,
     try_selective_scan,
 )
-from ossm.models.mambarec import _selective_scan_discretized
+from ossm.models.mambarec import _selective_scan_mamba
 
 
 def _make_inputs(
@@ -94,7 +94,7 @@ def main() -> None:
         return result
 
     def run_reference() -> torch.Tensor:
-        baseline = _selective_scan_discretized(inputs=x, dt=dt, A=A, B_t=B, C_t=C)
+        baseline = _selective_scan_mamba(inputs=x, dt=dt, A=A, B_t=B, C_t=C)
         return baseline * F.silu(gate)
 
     synchronize = device.type == "cuda"

@@ -99,11 +99,15 @@ if _kernels is not None and os.environ.get("OSSM_SELECTIVE_SCAN_TRACE"):
         _trace(f"[OSSM] Selective scan kernels available for: {', '.join(available)}")
 
 
-_DEFAULT_CHUNK = 16
+# Default chunk length for CUDA selective scan.
+# Larger chunks reduce saved chunk-state memory (∝ ceil(L/chunk)) but increase
+# backward shared memory usage ((3+chunk)*state*4 bytes). 64 is a good default
+# for typical state sizes (≤128) and keeps memory low at larger batches.
+_DEFAULT_CHUNK = 64
 try:
     _DEFAULT_CHUNK = int(os.environ.get("OSSM_SELECTIVE_SCAN_CHUNK", _DEFAULT_CHUNK))
 except ValueError:  # pragma: no cover - defensive parsing guard
-    _DEFAULT_CHUNK = 16
+    _DEFAULT_CHUNK = 64
 _DEFAULT_CHUNK = max(1, _DEFAULT_CHUNK)
 
 
@@ -159,14 +163,31 @@ def try_selective_scan(
     if kernels is None:
         return None
 
+    # Choose a chunk length that fits device shared memory for the given state size.
+    chunk = _DEFAULT_CHUNK
+    if device_type == "cuda":
+        try:
+            props = torch.cuda.get_device_properties(inputs.device)
+            # Shared memory per block in bytes; keep a small safety margin.
+            max_smem = int(props.shared_memory_per_block)
+        except Exception:  # pragma: no cover - best-effort device query
+            max_smem = 48 * 1024
+        state_dim = int(A.size(1)) if A.dim() == 2 else int(A.shape[-1])
+        # (3 + chunk) * state_dim * 4 <= max_smem  =>  chunk <= max_smem/(4*state_dim) - 3
+        if state_dim > 0:
+            safe_max = max(1, int(max_smem // (4 * state_dim) - 3))
+            if safe_max < 1:
+                safe_max = 1
+            chunk = max(1, min(chunk, safe_max))
+
     if not requires_grad:
         if device_type == "cuda":
-            outputs, _ = kernels.selective_scan_cuda(inputs, dt, A, B, C, gate, _DEFAULT_CHUNK)
+            outputs, _ = kernels.selective_scan_cuda(inputs, dt, A, B, C, gate, chunk)
             return outputs
         return kernels.selective_scan(inputs, dt, A, B, C, gate)
 
     try:
-        return _SelectiveScanFn.apply(inputs, dt, A, B, C, gate, _DEFAULT_CHUNK)
+        return _SelectiveScanFn.apply(inputs, dt, A, B, C, gate, chunk)
     except RuntimeError as exc:  # pragma: no cover - runtime mismatch
         global _EXTENSION_ERROR
         _EXTENSION_ERROR = exc

@@ -20,87 +20,44 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle guard
 __all__ = ["MambaLayer", "Mamba4Rec"]
 
 
-def _safe_expm1(x: torch.Tensor) -> torch.Tensor:
-    """Numerically stable ``expm1`` helper for ``float32`` tensors."""
-
-    return torch.expm1(x)
-
-
-def _selective_scan_discretized(
+def _selective_scan_mamba(
     inputs: torch.Tensor,
     dt: torch.Tensor,
     A: torch.Tensor,
     B_t: torch.Tensor,
     C_t: torch.Tensor,
 ) -> torch.Tensor:
-    r"""Selective SSM recurrence with exact diagonal discretization.
+    """Mamba-compatible selective scan using dt-based forcing (no phi).
 
-    The recurrence follows Algorithm 1 of the paper:
-
-    .. math::
-
-        \bar A &= \exp(\Delta A)\\
-        \phi(\Delta) &= (\exp(\Delta A) - 1) / A\\
-        h_t &= \bar A h_{t-1} + (\phi(\Delta) \odot B_t) u_t\\
-        y_t &= C_t^\top h_t
-
-    Shapes
-    ------
-    inputs: ``(batch, channels, length)``
-    dt: ``(batch, channels, length)``
-    A: ``(channels, state)``
-    B_t, C_t: ``(batch, length, state)``
+    Mirrors the reference path used by mamba-ssm when ``use_fast_path=False``:
+    h_t = exp(dt*A) h_{t-1} + (dt * B_t) * u_t; y_t = C_t^T h_t
+    All math is performed in float32 for stability.
+    Shapes:
+      inputs: (B, C, L)
+      dt:     (B, C, L)
+      A:      (C, S)
+      B_t,C_t:(B, L, S)
     """
-
     batch, channels, seqlen = inputs.shape
     if seqlen == 0:
         return inputs.new_zeros(batch, channels, seqlen)
 
-    # Perform the scan in float32 for stability.
     u = inputs.to(dtype=torch.float32)
     dt = dt.to(dtype=torch.float32)
     A_matrix = A.to(dtype=torch.float32)
     B_proj = B_t.to(dtype=torch.float32)
     C_proj = C_t.to(dtype=torch.float32)
 
-    # Expand the diagonal dynamics along the sequence dimension.
-    a_matrix = A_matrix.unsqueeze(0).unsqueeze(2)  # (1, channels, 1, state)
-    dA = dt.unsqueeze(-1) * a_matrix  # (batch, channels, length, state)
-    A_bar = torch.exp(dA)
-    phi = _safe_expm1(dA) / a_matrix
-
-    # Evaluate the forcing term (phi * B_t) * u_t in parallel across time.
-    forcing = (phi * B_proj.unsqueeze(1)) * u.unsqueeze(-1)
-
-    # Unroll the diagonal recurrence using cumulative products/sums.
-    # Guard against extremely contractive dynamics where the cumulative product
-    # would underflow in float32 by falling back to an explicit scan that avoids
-    # dividing by tiny values. This mirrors the numerically stable behavior of
-    # the original Python loop implementation.
-    state_size = A_matrix.shape[-1]
-    log_prefix = torch.cumsum(
-        torch.log(torch.clamp_min(A_bar.double(), torch.finfo(A_bar.dtype).tiny)),
-        dim=2,
-    )
-    tiny_log = math.log(torch.finfo(A_bar.dtype).tiny)
-    needs_sequential = bool(torch.any(log_prefix < tiny_log))
-
-    if needs_sequential:
-        state = torch.zeros(
-            (batch, channels, seqlen, state_size),
-            dtype=u.dtype,
-            device=u.device,
-        )
-        prev = torch.zeros((batch, channels, state_size), dtype=u.dtype, device=u.device)
-        for t in range(seqlen):
-            prev = A_bar[:, :, t] * prev + forcing[:, :, t]
-            state[:, :, t] = prev
-    else:
-        prefix_prod = torch.cumprod(A_bar, dim=2)
-        scaled_forcing = forcing / prefix_prod
-        state = prefix_prod * torch.cumsum(scaled_forcing, dim=2)
-
-    y = torch.einsum("bcls,bls->bcl", state, C_proj)
+    a_matrix = A_matrix.unsqueeze(0)  # (1, C, S)
+    state = torch.zeros(batch, channels, A_matrix.size(1), dtype=u.dtype, device=u.device)
+    ys: list[torch.Tensor] = []
+    for t in range(seqlen):
+        delta = dt[:, :, t].unsqueeze(-1)  # (B, C, 1)
+        A_bar = torch.exp(delta * a_matrix)  # (B, C, S)
+        forcing = (delta * B_proj[:, t].unsqueeze(1)) * u[:, :, t].unsqueeze(-1)
+        state = A_bar * state + forcing
+        ys.append(torch.einsum("bcs,bs->bc", state, C_proj[:, t]))
+    y = torch.stack(ys, dim=-1)
     return y.to(dtype=inputs.dtype)
 
 
@@ -201,17 +158,19 @@ class _MambaMixer(nn.Module):
         A_param = -torch.exp(self.A_log.float())
         gate = z.transpose(1, 2)
 
+        # Ensure fused kernels are eligible under autocast by using float32 inputs.
+        # Default to Mamba-SSM selective scan numerics to match upstream.
         fused = _try_selective_scan(
-            inputs=x_conv,
-            dt=dt_proj,
-            A=A_param,
-            B=B_gen,
-            C=C_gen,
-            gate=gate,
+            inputs=x_conv.to(dtype=torch.float32),
+            dt=dt_proj.to(dtype=torch.float32),
+            A=A_param.to(dtype=torch.float32),
+            B=B_gen.to(dtype=torch.float32),
+            C=C_gen.to(dtype=torch.float32),
+            gate=gate.to(dtype=torch.float32),
         )
 
         if fused is None:
-            outputs = _selective_scan_discretized(
+            outputs = _selective_scan_mamba(
                 inputs=x_conv,
                 dt=dt_proj,
                 A=A_param,
@@ -220,7 +179,7 @@ class _MambaMixer(nn.Module):
             )
             gated = outputs * F.silu(gate)
         else:
-            gated = fused
+            gated = fused.to(dtype=x_conv.dtype)
 
         return self.out_proj(gated.transpose(1, 2))
 

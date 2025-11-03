@@ -90,13 +90,11 @@ __global__ void selective_scan_forward_kernel(const float* __restrict__ inputs,
 
   extern __shared__ float shared[];
   float* shared_A = shared;
-  float* shared_invA = shared_A + state_dim;
-  float* state = shared_invA + state_dim;
+  float* state = shared_A + state_dim;
 
   for (int idx = threadIdx.x; idx < state_dim; idx += Threads) {
     const float a = A_row[idx];
     shared_A[idx] = a;
-    shared_invA[idx] = 1.0f / a;
     state[idx] = 0.0f;
   }
   __syncthreads();
@@ -108,7 +106,6 @@ __global__ void selective_scan_forward_kernel(const float* __restrict__ inputs,
     float partial = 0.0f;
     for (int idx = threadIdx.x; idx < state_dim; idx += Threads) {
       const float a = shared_A[idx];
-      const float inv_a = shared_invA[idx];
       float lane_state = state[idx];
 
       const float* B_step = B + (static_cast<std::size_t>(b) * length + t) * state_dim;
@@ -116,9 +113,7 @@ __global__ void selective_scan_forward_kernel(const float* __restrict__ inputs,
 
       const float delta = dt_scalar * a;
       const float A_bar = __expf(delta);
-      const float phi = expm1f(delta) * inv_a;
-
-      lane_state = fmaf(A_bar, lane_state, phi * B_step[idx] * input_scalar);
+      lane_state = fmaf(A_bar, lane_state, dt_scalar * B_step[idx] * input_scalar);
       state[idx] = lane_state;
 
       partial = fmaf(lane_state, C_step[idx], partial);
@@ -188,14 +183,12 @@ __global__ void selective_scan_backward_kernel(const float* __restrict__ grad_ou
 
   extern __shared__ float shared[];
   float* shared_A = shared;
-  float* shared_invA = shared_A + state_dim;
-  float* shared_dA = shared_invA + state_dim;
+  float* shared_dA = shared_A + state_dim;
   float* shared_states = shared_dA + state_dim;
 
   for (int idx = threadIdx.x; idx < state_dim; idx += Threads) {
     const float a = A_row[idx];
     shared_A[idx] = a;
-    shared_invA[idx] = 1.0f / a;
   }
   __syncthreads();
 
@@ -226,14 +219,11 @@ __global__ void selective_scan_backward_kernel(const float* __restrict__ grad_ou
         const float dt_scalar = dt_lane[t];
         const float input_scalar = inputs_lane[t];
         const float a = shared_A[idx];
-        const float inv_a = shared_invA[idx];
         const float* B_step = B + (static_cast<std::size_t>(b) * length + t) * state_dim;
 
         const float delta = dt_scalar * a;
         const float A_bar = __expf(delta);
-        const float phi = expm1f(delta) * inv_a;
-
-        state_prev = fmaf(A_bar, state_prev, phi * B_step[idx] * input_scalar);
+        state_prev = fmaf(A_bar, state_prev, dt_scalar * B_step[idx] * input_scalar);
         state_ptr[step * state_dim] = state_prev;
       }
     }
@@ -274,7 +264,6 @@ __global__ void selective_scan_backward_kernel(const float* __restrict__ grad_ou
       for (int stride_index = 0, idx = threadIdx.x; idx < state_dim;
            ++stride_index, idx += Threads) {
         const float a = shared_A[idx];
-        const float inv_a = shared_invA[idx];
         const float state_t = shared_states[step * state_dim + idx];
         const float state_prev = (step == 0)
                                      ? ((chunk_index == 0)
@@ -289,22 +278,16 @@ __global__ void selective_scan_backward_kernel(const float* __restrict__ grad_ou
 
         const float delta = dt_scalar * a;
         const float A_bar = __expf(delta);
-        const float phi = expm1f(delta) * inv_a;
-
         atomicAdd(grad_C + (static_cast<std::size_t>(b) * length + t) * state_dim + idx,
                   grad_y_scalar * state_t);
 
         atomicAdd(grad_B + (static_cast<std::size_t>(b) * length + t) * state_dim + idx,
-                  grad_state * phi * input_scalar);
+                  grad_state * dt_scalar * input_scalar);
 
-        grad_input += grad_state * phi * B_step[idx];
+        grad_input += grad_state * dt_scalar * B_step[idx];
 
-        const float grad_E = grad_state * state_prev;
-        const float grad_phi = grad_state * B_step[idx] * input_scalar;
-        const float grad_delta = grad_E * A_bar + grad_phi * (A_bar * inv_a);
-
-        shared_dA[idx] += grad_delta * dt_scalar - grad_phi * phi * inv_a;
-        grad_dt_value += grad_delta * a;
+        shared_dA[idx] += grad_state * (dt_scalar * A_bar * state_prev);
+        grad_dt_value += grad_state * (a * A_bar * state_prev + B_step[idx] * input_scalar);
 
         grad_state_local[stride_index] = grad_state * A_bar;
       }
@@ -388,7 +371,7 @@ std::vector<at::Tensor> selective_scan_cuda_forward(const at::Tensor& inputs,
       {inputs.size(0), inputs.size(1), num_chunks, A.size(1)}, inputs.options());
 
   dim3 grid(batch, channels);
-  const std::size_t shared_bytes = static_cast<std::size_t>(state_dim * 3) * sizeof(float);
+  const std::size_t shared_bytes = static_cast<std::size_t>(state_dim * 2) * sizeof(float);
 
   auto stream = at::cuda::getCurrentCUDAStream();
   selective_scan_forward_kernel<kBlockThreads><<<grid, kBlockThreads, shared_bytes, stream>>>(
@@ -468,7 +451,7 @@ std::vector<at::Tensor> selective_scan_cuda_backward(const at::Tensor& grad_outp
 
   dim3 grid(batch, channels);
   const std::size_t shared_bytes =
-      static_cast<std::size_t>((3 + chunk) * state_dim) * sizeof(float);
+      static_cast<std::size_t>((2 + chunk) * state_dim) * sizeof(float);
 
   auto stream = at::cuda::getCurrentCUDAStream();
   selective_scan_backward_kernel<kBlockThreads><<<grid, kBlockThreads, shared_bytes, stream>>>(
@@ -498,4 +481,3 @@ std::vector<at::Tensor> selective_scan_cuda_backward(const at::Tensor& grad_outp
 }
 
 }  // namespace ossm
-

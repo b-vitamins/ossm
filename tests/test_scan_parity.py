@@ -12,7 +12,7 @@ from ossm.models._selective_scan import (
     has_kernels as _selective_has_kernels,
     try_selective_scan as _try_selective_scan,
 )
-from ossm.models.mambarec import _selective_scan_discretized
+from ossm.models.mambarec import _selective_scan_mamba
 
 
 def _has_kernel(attr: str) -> bool:
@@ -75,7 +75,7 @@ def test_selective_scan_kernel_matches_reference() -> None:
     fused = _try_selective_scan(inputs, dt, A, B, C, gate)
     assert fused is not None
 
-    reference = _selective_scan_discretized(inputs=inputs, dt=dt, A=A, B_t=B, C_t=C)
+    reference = _selective_scan_mamba(inputs=inputs, dt=dt, A=A, B_t=B, C_t=C)
     reference = reference * F.silu(gate)
 
     torch.testing.assert_close(fused, reference, rtol=1e-4, atol=5e-5)
@@ -117,7 +117,7 @@ def test_selective_scan_kernel_backward_matches_reference() -> None:
     for tensor in (inputs, dt, A, B, C, gate):
         tensor.grad.zero_()
 
-    reference = _selective_scan_discretized(inputs=inputs, dt=dt, A=A, B_t=B, C_t=C)
+    reference = _selective_scan_mamba(inputs=inputs, dt=dt, A=A, B_t=B, C_t=C)
     reference = reference * F.silu(gate)
     ref_loss = reference.square().mean()
     ref_loss.backward()
@@ -160,7 +160,7 @@ def test_selective_scan_kernel_matches_reference_cuda() -> None:
     fused = _try_selective_scan(inputs, dt, A, B, C, gate)
     assert fused is not None
 
-    reference = _selective_scan_discretized(inputs=inputs, dt=dt, A=A, B_t=B, C_t=C)
+    reference = _selective_scan_mamba(inputs=inputs, dt=dt, A=A, B_t=B, C_t=C)
     reference = reference * F.silu(gate)
     torch.testing.assert_close(fused, reference, rtol=2e-4, atol=1e-4)
 

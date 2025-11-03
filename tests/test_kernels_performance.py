@@ -23,7 +23,7 @@ from ossm.models._selective_scan import (
     has_kernels as _selective_has_kernels,
     try_selective_scan as _try_selective_scan,
 )
-from ossm.models.mambarec import _selective_scan_discretized
+from ossm.models.mambarec import _selective_scan_mamba
 from ossm.models.dlinoss import DampedLinOSSLayer
 from ossm.models.sdlinoss import SelectiveDLinOSSLayer
 
@@ -112,7 +112,7 @@ _CUDA_SPEEDUPS = {
     "lru": 3.0,
     "s5": 3.0,
     "rnn": 3.5,
-    "selective": 6.0,
+    "selective": 8.0,
 }
 
 _SPEEDUP_TOLERANCE = 0.15
@@ -259,7 +259,7 @@ def _setup_selective_case(
             return cast(Tensor, result)
 
         def run_reference() -> Tensor:
-            baseline = _selective_scan_discretized(inputs=inputs, dt=dt, A=A, B_t=B, C_t=C)
+            baseline = _selective_scan_mamba(inputs=inputs, dt=dt, A=A, B_t=B, C_t=C)
             return baseline * F.silu(gate)
 
         return run_extension, run_reference, None
