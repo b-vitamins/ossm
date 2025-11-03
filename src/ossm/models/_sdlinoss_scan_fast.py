@@ -31,6 +31,73 @@ except ImportError:  # pragma: no cover - build-time failure surface
     _kernels = None
 
 
+def _infer_real_dtype_from_complex(z: Tensor) -> torch.dtype:
+    if z.dtype == torch.complex64:
+        return torch.float32
+    if z.dtype == torch.complex128:
+        return torch.float64
+    raise TypeError(f"Expected complex64/complex128, got {z.dtype}.")
+
+
+def _normalize_param(
+    param: Tensor,
+    name: str,
+    length: int,
+    batch: int,
+    ssm: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tensor:
+    if param.device != device:
+        raise ValueError(f"{name} must be on device {device}, got {param.device}.")
+    if param.dtype != dtype:
+        raise TypeError(f"{name} must have dtype {dtype}, got {param.dtype}.")
+    if not torch.is_floating_point(param):
+        raise TypeError(f"{name} must be a floating point tensor, got {param.dtype}.")
+
+    if param.dim() == 1 and param.shape[0] == ssm:
+        return param.unsqueeze(0).unsqueeze(0)
+
+    if param.dim() == 2 and param.shape[1] == ssm:
+        if param.shape[0] == length:
+            return param.unsqueeze(1)
+        if param.shape[0] == batch:
+            return param.unsqueeze(0)
+
+    if param.dim() == 3 and param.shape[2] == ssm:
+        len_ok = param.shape[0] in (1, length)
+        batch_ok = param.shape[1] in (1, batch)
+        if len_ok and batch_ok:
+            return param
+
+    raise ValueError(
+        f"{name} must be shaped as (M,), (L,M), (B,M), or (L,B,M); got {tuple(param.shape)}."
+    )
+
+
+def _normalize_inputs(A: Tensor, G: Tensor, step: Tensor, bu: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    if bu.dim() != 3:
+        raise ValueError("bu must be (length, batch, ssm_size) complex.")
+    if not bu.is_complex():
+        raise TypeError("bu must be complex valued.")
+
+    length, batch, ssm = bu.shape
+    device = bu.device
+    real_dtype = _infer_real_dtype_from_complex(bu)
+
+    A_view = _normalize_param(A, "A", length, batch, ssm, device=device, dtype=real_dtype)
+    G_view = _normalize_param(G, "G", length, batch, ssm, device=device, dtype=real_dtype)
+    step_view = _normalize_param(step, "step", length, batch, ssm, device=device, dtype=real_dtype)
+
+    return (
+        A_view.contiguous(),
+        G_view.contiguous(),
+        step_view.contiguous(),
+        bu.contiguous(),
+    )
+
+
 def has_fast_kernels(variant: Optional[str] = None) -> bool:
     """Return whether the fast selective D-LinOSS kernels are available."""
 
@@ -239,6 +306,8 @@ def run_sdlinoss_fast(
     if not has_fast_kernels(variant_normalized):
         raise RuntimeError(f"Fast kernels for variant '{variant}' are unavailable in this build.")
 
+    A_norm, G_norm, step_norm, bu_norm = _normalize_inputs(A, G, step, bu)
+
     fn = dispatch[variant_normalized]
-    return cast(Tensor, fn.apply(A, G, step, bu))
+    return cast(Tensor, fn.apply(A_norm, G_norm, step_norm, bu_norm))
 
