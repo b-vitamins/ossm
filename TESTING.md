@@ -70,6 +70,26 @@ The following commands were executed to validate the training entrypoint against
 
 All runs completed without runtime errors, produced telemetry at the configured logging cadence, and saved outputs under `outputs/`.
 
+## Fast selective D-LinOSS
+
+The selective D-LinOSS kernels ship with a fast path that mirrors the reference recurrence while offering sizable speedups on long sequences. Enable and tune the kernels with the following environment flags:
+
+- `OSSM_SDLINOSS_FAST=1` — route `run_sdlinoss` through the fast CUDA kernels (default off).
+- `OSSM_SDLINOSS_FAST_X_ONLY=1` — store only the `x` trajectory during forward and reconstruct `w` in backward, cutting activation storage by roughly 2× while preserving numerics.
+- `OSSM_SDLINOSS_FAST_TILE={64,128,256}` — tile length for the associative scan (default 128).
+- `OSSM_FAST_UNROLL={1,2,4}` — inner-loop unroll factor for the fast kernels (default 2).
+- `OSSM_SDLINOSS_FAST_PREFETCH=1` — enable `cp.async` prefetch on SM80+ GPUs.
+
+### Running perf tests
+
+Performance tests are opt-in so day-to-day CI stays snappy. To exercise the fast-vs-legacy benchmarks on CUDA builds:
+
+```bash
+OSSM_PERF=1 OSSM_SDLINOSS_FAST=1 pytest -k perf -q
+```
+
+On a modern SM80+ GPU with complex64 inputs, the fast kernels should reach ≥2.5× speedup over the legacy path for `L=4096, B=8, M=256` across all variants.
+
 ## Sequential recommendation: 20-step Amazon Beauty trace
 
 To sanity-check the seqrec tracer on real data, prepare the Amazon Beauty split with the repository script:

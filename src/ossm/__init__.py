@@ -50,6 +50,7 @@ from .models import (
     SelectiveDLinOSSLayer,
     TiedSoftmaxHead,
     run_sdlinoss,
+    has_fast_kernels,
 )
 __all__: tuple[str, ...] = (
     "data",
@@ -94,4 +95,5 @@ __all__: tuple[str, ...] = (
     "SelectiveDLinOSSLayer",
     "TiedSoftmaxHead",
     "run_sdlinoss",
+    "has_fast_kernels",
 )

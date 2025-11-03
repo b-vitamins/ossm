@@ -8,8 +8,15 @@ from typing import Any, Callable, Optional, Protocol, Tuple, cast
 import torch
 from torch import Tensor, autocast
 
+from ._sdlinoss_scan_fast import (
+    USE_FAST as _FAST_USE,
+    has_fast_kernels,
+    run_sdlinoss_fast as _run_sdlinoss_fast,
+)
+
 __all__ = [
     "extension_error",
+    "has_fast_kernels",
     "has_kernels",
     "run_sdlinoss",
 ]
@@ -404,6 +411,10 @@ def run_sdlinoss(variant: str, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu:
 
     if length == 0:
         return bu.new_empty((0, batch, ssm))
+
+    if _FAST_USE and has_fast_kernels(variant):
+        fast_output = _run_sdlinoss_fast(variant, A_view, G_view, step_view, bu)
+        return fast_output
 
     def _fallback_from_views() -> Tensor:
         states = _reference_sdlinoss_states_from_views(

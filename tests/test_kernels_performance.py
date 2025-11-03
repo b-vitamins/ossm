@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Tuple, cast
 from unittest import mock
@@ -14,6 +15,7 @@ from torch.utils import benchmark
 
 import ossm.models._dlinoss_scan as _dlinoss_scan_module
 import ossm.models._sdlinoss_scan as _sdlinoss_scan_module
+import ossm.models._sdlinoss_scan_fast as _sdlinoss_scan_fast_module
 from ossm.models._dlinoss_scan import has_kernels as _dlinoss_has_kernels
 from ossm.models._linoss_scan import try_run_scan as _linoss_try_run_scan
 from ossm.models._lru_scan import try_run_lru_scan
@@ -116,6 +118,22 @@ _CUDA_SPEEDUPS = {
 }
 
 _SPEEDUP_TOLERANCE = 0.15
+
+
+def _perf_env_enabled() -> bool:
+    return os.getenv("OSSM_PERF", "0") == "1"
+
+
+def _bench_cuda(fn: Callable[[], Tensor], *, iters: int = 25, warmup: int = 5) -> float:
+    torch.cuda.synchronize()
+    samples: list[float] = []
+    for idx in range(iters):
+        start = time.perf_counter()
+        fn()
+        torch.cuda.synchronize()
+        if idx >= warmup:
+            samples.append(time.perf_counter() - start)
+    return sum(samples) / len(samples)
 
 
 _SDLINOSS_VARIANTS = ("imex1", "imex2", "im", "ex")
@@ -968,6 +986,52 @@ _CUDA_CASES.extend(
         ),
     ]
 )
+
+
+@pytest.mark.perf
+@pytest.mark.parametrize("variant", _SDLINOSS_VARIANTS)
+def test_sdlinoss_fast_beats_legacy_cuda(variant: str) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    if not _perf_env_enabled():
+        pytest.skip("OSSM_PERF=1 required for perf gating")
+    if not _sdlinoss_scan_module.has_kernels(variant):
+        pytest.skip(f"Selective D-LinOSS {variant} kernels unavailable")
+
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device).manual_seed(0)
+    length, batch, state = 4096, 8, 256
+    complex_dtype = torch.complex64
+    real_dtype = torch.float32
+
+    bu = torch.randn(length, batch, state, dtype=complex_dtype, device=device, generator=generator)
+    A = torch.randn(state, dtype=real_dtype, device=device, generator=generator)
+    G = torch.randn(state, dtype=real_dtype, device=device, generator=generator)
+    step = torch.rand(state, dtype=real_dtype, device=device, generator=generator) * 0.5 + 0.1
+
+    def _run() -> Tensor:
+        with torch.no_grad():
+            return _sdlinoss_scan_module.run_sdlinoss(variant, A, G, step, bu)
+
+    def _measure(use_fast: bool) -> float:
+        env_updates = {
+            "OSSM_SDLINOSS_FAST": "1" if use_fast else "0",
+            "OSSM_SDLINOSS_FAST_X_ONLY": "0",
+        }
+        with mock.patch.dict(os.environ, env_updates, clear=False):
+            with mock.patch.object(_sdlinoss_scan_module, "_FAST_USE", use_fast):
+                with mock.patch.object(_sdlinoss_scan_fast_module, "USE_FAST", use_fast):
+                    with mock.patch.object(_sdlinoss_scan_fast_module, "X_ONLY", False):
+                        torch.cuda.synchronize()
+                        _run()
+                        torch.cuda.synchronize()
+                        return _bench_cuda(_run)
+
+    legacy_time = _measure(False)
+    fast_time = _measure(True)
+
+    speedup = legacy_time / fast_time
+    assert speedup >= 2.5, f"{variant} speedup {speedup:.2f}x below 2.5x budget"
 
 
 @pytest.mark.performance

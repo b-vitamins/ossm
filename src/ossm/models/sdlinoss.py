@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, autocast, nn
 
-from ._sdlinoss_scan import run_sdlinoss
+from ._sdlinoss_scan import has_fast_kernels, run_sdlinoss
 from .base import Backbone, ResidualSSMBlock, SequenceBackboneOutput
 from .linoss import GatedLinearUnit
 
@@ -19,6 +19,7 @@ __all__ = [
     "SelectiveDLinOSSBlock",
     "SelectiveDLinOSSBackbone",
     "run_sdlinoss",
+    "has_fast_kernels",
 ]
 
 _VALID_VARIANTS = ("imex1", "imex2", "im", "ex")
