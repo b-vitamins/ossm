@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Any, Optional, cast
 
 import torch
 from torch import Tensor
@@ -70,7 +70,7 @@ def _im_forward(A: Tensor, G: Tensor, step: Tensor, bu: Tensor) -> Tensor:
 
 class SdlinossExFastFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx: torch.autograd.FunctionCtx, A: Tensor, G: Tensor, step: Tensor, bu: Tensor) -> Tensor:  # type: ignore[override]
+    def forward(ctx: Any, A: Tensor, G: Tensor, step: Tensor, bu: Tensor) -> Tensor:  # type: ignore[override]
         if _kernels is None:
             raise RuntimeError("Selective D-LinOSS fast kernels are unavailable; extension not loaded.")
 
@@ -86,9 +86,7 @@ class SdlinossExFastFn(torch.autograd.Function):
         return states[..., 1]
 
     @staticmethod
-    def backward(
-        ctx: torch.autograd.FunctionCtx, grad_out: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:  # type: ignore[override]
+    def backward(ctx: Any, grad_out: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:  # type: ignore[override]
         if _kernels is None:
             raise RuntimeError("Selective D-LinOSS fast kernels are unavailable; extension not loaded.")
 
@@ -108,7 +106,7 @@ class SdlinossExFastFn(torch.autograd.Function):
 
 class SdlinossImex1FastFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx: torch.autograd.FunctionCtx, A: Tensor, G: Tensor, step: Tensor, bu: Tensor) -> Tensor:  # type: ignore[override]
+    def forward(ctx: Any, A: Tensor, G: Tensor, step: Tensor, bu: Tensor) -> Tensor:  # type: ignore[override]
         if _kernels is None:
             raise RuntimeError("Selective D-LinOSS fast kernels are unavailable; extension not loaded.")
 
@@ -124,9 +122,7 @@ class SdlinossImex1FastFn(torch.autograd.Function):
         return states[..., 1]
 
     @staticmethod
-    def backward(
-        ctx: torch.autograd.FunctionCtx, grad_out: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:  # type: ignore[override]
+    def backward(ctx: Any, grad_out: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:  # type: ignore[override]
         if _kernels is None:
             raise RuntimeError("Selective D-LinOSS fast kernels are unavailable; extension not loaded.")
 
@@ -146,7 +142,7 @@ class SdlinossImex1FastFn(torch.autograd.Function):
 
 class SdlinossImex2FastFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx: torch.autograd.FunctionCtx, A: Tensor, G: Tensor, step: Tensor, bu: Tensor) -> Tensor:  # type: ignore[override]
+    def forward(ctx: Any, A: Tensor, G: Tensor, step: Tensor, bu: Tensor) -> Tensor:  # type: ignore[override]
         if _kernels is None:
             raise RuntimeError("Selective D-LinOSS fast kernels are unavailable; extension not loaded.")
 
@@ -162,9 +158,7 @@ class SdlinossImex2FastFn(torch.autograd.Function):
         return states[..., 1]
 
     @staticmethod
-    def backward(
-        ctx: torch.autograd.FunctionCtx, grad_out: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:  # type: ignore[override]
+    def backward(ctx: Any, grad_out: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:  # type: ignore[override]
         if _kernels is None:
             raise RuntimeError("Selective D-LinOSS fast kernels are unavailable; extension not loaded.")
 
@@ -182,7 +176,7 @@ class SdlinossImex2FastFn(torch.autograd.Function):
 
 class SdlinossImFastFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx: torch.autograd.FunctionCtx, A: Tensor, G: Tensor, step: Tensor, bu: Tensor) -> Tensor:  # type: ignore[override]
+    def forward(ctx: Any, A: Tensor, G: Tensor, step: Tensor, bu: Tensor) -> Tensor:  # type: ignore[override]
         if _kernels is None:
             raise RuntimeError("Selective D-LinOSS fast kernels are unavailable; extension not loaded.")
 
@@ -198,9 +192,7 @@ class SdlinossImFastFn(torch.autograd.Function):
         return states[..., 1]
 
     @staticmethod
-    def backward(
-        ctx: torch.autograd.FunctionCtx, grad_out: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:  # type: ignore[override]
+    def backward(ctx: Any, grad_out: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:  # type: ignore[override]
         if _kernels is None:
             raise RuntimeError("Selective D-LinOSS fast kernels are unavailable; extension not loaded.")
 
@@ -248,5 +240,5 @@ def run_sdlinoss_fast(
         raise RuntimeError(f"Fast kernels for variant '{variant}' are unavailable in this build.")
 
     fn = dispatch[variant_normalized]
-    return fn.apply(A, G, step, bu)
+    return cast(Tensor, fn.apply(A, G, step, bu))
 
