@@ -90,10 +90,21 @@ def _normalize_inputs(A: Tensor, G: Tensor, step: Tensor, bu: Tensor) -> tuple[T
     G_view = _normalize_param(G, "G", length, batch, ssm, device=device, dtype=real_dtype)
     step_view = _normalize_param(step, "step", length, batch, ssm, device=device, dtype=real_dtype)
 
+    def _materialize(param: Tensor) -> Tensor:
+        """Return a contiguous tensor whose length/batch match ``bu`` exactly."""
+
+        length_dim = length if param.size(0) == 1 else param.size(0)
+        batch_dim = batch if param.size(1) == 1 else param.size(1)
+
+        if length_dim == param.size(0) and batch_dim == param.size(1):
+            return param.contiguous()
+
+        return param.expand(length_dim, batch_dim, ssm).contiguous()
+
     return (
-        A_view.contiguous(),
-        G_view.contiguous(),
-        step_view.contiguous(),
+        _materialize(A_view),
+        _materialize(G_view),
+        _materialize(step_view),
         bu.contiguous(),
     )
 
