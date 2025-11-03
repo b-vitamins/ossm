@@ -105,7 +105,7 @@ std::vector<at::Tensor> sdlinoss_ex_backward(const at::Tensor& A,
                                              const at::Tensor& states,
                                              const at::Tensor& grad_output);
 
-// Fast selective D-LinOSS CUDA kernels.
+// Forward declarations for the selective D-LinOSS fast CUDA kernels.
 at::Tensor sdlinoss_fast_ex_forward(const at::Tensor& A,
                                     const at::Tensor& G,
                                     const at::Tensor& step,
