@@ -1,5 +1,7 @@
 #include <ATen/ATen.h>
+#ifdef WITH_CUDA
 #include <ATen/cuda/CUDAContext.h>
+#endif
 #include <c10/util/Exception.h>
 
 #include <cstdlib>
