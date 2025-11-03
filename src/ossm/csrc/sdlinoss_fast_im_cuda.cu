@@ -2642,10 +2642,11 @@ void sdlinoss_fast_im_forward_short_cuda_complex64(int tile,
                                               S0_w,
                                               S0_x,
                                               states,
-                                                   length,
-                                                   series,
-                                                   ssm,
-                                                   stream);
+                                              length,
+                                              series,
+                                              ssm,
+                                              stream);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void sdlinoss_fast_im_forward_short_xonly_cuda_complex64(int tile,
@@ -2682,6 +2683,7 @@ void sdlinoss_fast_im_forward_short_xonly_cuda_complex64(int tile,
                                                 series,
                                                 ssm,
                                                 stream);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void sdlinoss_fast_im_forward_short_xonly_cuda_complex128(int tile,
@@ -2718,6 +2720,7 @@ void sdlinoss_fast_im_forward_short_xonly_cuda_complex128(int tile,
                                                  series,
                                                  ssm,
                                                  stream);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void sdlinoss_fast_im_forward_short_cuda_complex128(int tile,
@@ -2754,6 +2757,7 @@ void sdlinoss_fast_im_forward_short_cuda_complex128(int tile,
                                                series,
                                                ssm,
                                                stream);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 }  // namespace ossm

@@ -58,7 +58,12 @@ struct GradStrided3 {
     const int64_t mm = nM == 1 ? 0 : m;
     scalar_t* addr = p + tt * sL + bb * sB + mm * sM;
 #ifdef __CUDA_ARCH__
-    const bool reduce_broadcast = (sB == 0 || sM == 0);
+    const bool reduce_broadcast = (sB == 0 || sM == 0 || reduce_B || reduce_M);
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 600
+    static_assert(
+        !std::is_same_v<scalar_t, c10::complex<double>>,
+        "complex128 broadcast reductions require SM60+. Disable complex128 or target a newer GPU.");
+#endif
     if (reduce_broadcast) {
       if constexpr (std::is_same_v<scalar_t, float> || std::is_same_v<scalar_t, double>) {
         atomicAdd(addr, value);
@@ -74,7 +79,8 @@ struct GradStrided3 {
       *addr = value;
     }
 #else
-    if (reduce_L || sB == 0 || sM == 0) {
+    const bool reduce_broadcast = (sB == 0 || sM == 0 || reduce_B || reduce_M);
+    if (reduce_L || reduce_broadcast) {
       *addr += value;
     } else {
       *addr = value;
