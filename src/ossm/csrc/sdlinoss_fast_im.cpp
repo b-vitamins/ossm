@@ -13,11 +13,10 @@
 #include "sdlinoss_fast_dispatch.h"
 
 namespace ossm {
-namespace {
 
 constexpr int64_t kDefaultTile = 128;
 
-int64_t parse_tile_env() {
+static inline int64_t parse_tile_env() {
   const char* env = std::getenv("OSSM_SDLINOSS_FAST_TILE");
   if (env == nullptr) {
     return kDefaultTile;
@@ -311,8 +310,6 @@ void sdlinoss_fast_im_backward_xonly_cuda_complex128(int tile,
                                                      cudaStream_t stream);
 
 #endif  // WITH_CUDA
-
-}  // namespace
 
 at::Tensor sdlinoss_fast_im_forward(const at::Tensor& A,
                                     const at::Tensor& G,

@@ -123,7 +123,18 @@ __global__ void imex1_build_tile_summaries_kernel(
     P.f0 = scalar_t(0);
     P.f1 = scalar_t(0);
 
-    #pragma unroll OSSM_FAST_UNROLL
+    // NVCC may not expand macros in pragma arguments; select literal here
+    #if OSSM_FAST_UNROLL == 1
+    #pragma unroll 1
+    #elif OSSM_FAST_UNROLL == 2
+    #pragma unroll 2
+    #elif OSSM_FAST_UNROLL == 4
+    #pragma unroll 4
+    #elif OSSM_FAST_UNROLL == 8
+    #pragma unroll 8
+    #else
+    #pragma unroll
+    #endif
     for (int64_t k = 0; k < tile_len; ++k) {
       const int64_t t = start + k;
       const value_t A_val =
@@ -291,7 +302,18 @@ __global__ void imex1_expand_tiles_write_states_kernel(
     }
 #endif
 
-    #pragma unroll OSSM_FAST_UNROLL
+    // NVCC may not expand macros in pragma arguments; select literal here
+    #if OSSM_FAST_UNROLL == 1
+    #pragma unroll 1
+    #elif OSSM_FAST_UNROLL == 2
+    #pragma unroll 2
+    #elif OSSM_FAST_UNROLL == 4
+    #pragma unroll 4
+    #elif OSSM_FAST_UNROLL == 8
+    #pragma unroll 8
+    #else
+    #pragma unroll
+    #endif
     for (int64_t k = 0; k < tile_len; ++k) {
       const int64_t t = start + k;
       value_t A_val;
@@ -450,7 +472,18 @@ __global__ void imex1_expand_tiles_write_x_kernel(
     }
 #endif
 
-    #pragma unroll OSSM_FAST_UNROLL
+    // NVCC may not expand macros in pragma arguments; select literal here
+    #if OSSM_FAST_UNROLL == 1
+    #pragma unroll 1
+    #elif OSSM_FAST_UNROLL == 2
+    #pragma unroll 2
+    #elif OSSM_FAST_UNROLL == 4
+    #pragma unroll 4
+    #elif OSSM_FAST_UNROLL == 8
+    #pragma unroll 8
+    #else
+    #pragma unroll
+    #endif
     for (int64_t k = 0; k < tile_len; ++k) {
       const int64_t t = start + k;
 #if __CUDA_ARCH__ >= 800 && OSSM_PREFETCH
