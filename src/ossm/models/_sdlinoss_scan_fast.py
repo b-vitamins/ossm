@@ -49,7 +49,13 @@ def has_fast_kernels(variant: Optional[str] = None) -> bool:
         return False
 
     attr = f"sdlinoss_fast_{variant}_forward"
-    return hasattr(_kernels, attr)
+    if not hasattr(_kernels, attr):
+        return False
+    if X_ONLY:
+        x_attr = f"sdlinoss_fast_{variant}_forward_xonly"
+        if not hasattr(_kernels, x_attr):
+            return False
+    return True
 
 
 def _im_forward(A: Tensor, G: Tensor, step: Tensor, bu: Tensor) -> Tensor:
@@ -183,10 +189,12 @@ class SdlinossImFastFn(torch.autograd.Function):
         if X_ONLY:
             x = _kernels.sdlinoss_fast_im_forward_xonly(A, G, step, bu)
             ctx.save_for_backward(A, G, step, bu, x)
+            ctx.x_only = True
             return x
 
         states = _kernels.sdlinoss_fast_im_forward(A, G, step, bu)
         ctx.save_for_backward(A, G, step, bu, states)
+        ctx.x_only = False
         return states[..., 1]
 
     @staticmethod
@@ -198,7 +206,7 @@ class SdlinossImFastFn(torch.autograd.Function):
 
         grad_out = grad_out.contiguous()
 
-        if X_ONLY:
+        if getattr(ctx, "x_only", False):
             A, G, step, bu, x_only = ctx.saved_tensors
             grad_A, grad_G, grad_step, grad_bu = _kernels.sdlinoss_fast_im_backward_xonly(
                 A, G, step, bu, x_only, grad_out

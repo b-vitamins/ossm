@@ -93,14 +93,10 @@ __global__ void ex_backward_kernel(
       const int64_t offset_series = t * series + idx;
       const int64_t offset_state = offset_series * 2;
 
-      const scalar_t x_new = states[offset_state + 1];
       const scalar_t x_prev =
           (t > 0) ? states[(offset_series - series) * 2 + 1] : scalar_t(0);
       const scalar_t w_prev_state =
           (t > 0) ? states[(offset_series - series) * 2] : scalar_t(0);
-      const scalar_t w_new = x_new - x_prev;
-      (void)w_new;
-
       const value_t w_prev_real = w_prev_state.real();
       const value_t w_prev_imag = w_prev_state.imag();
       const value_t x_prev_real = x_prev.real();

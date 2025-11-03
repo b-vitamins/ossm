@@ -412,9 +412,13 @@ def run_sdlinoss(variant: str, a_diag: Tensor, g_diag: Tensor, step: Tensor, bu:
     if length == 0:
         return bu.new_empty((0, batch, ssm))
 
-    if _FAST_USE and has_fast_kernels(variant):
-        fast_output = _run_sdlinoss_fast(variant, A_view, G_view, step_view, bu)
-        return fast_output
+    if _FAST_USE and bu.is_cuda and has_fast_kernels(variant):
+        A_fast = A_view.contiguous()
+        G_fast = G_view.contiguous()
+        step_fast = step_view.contiguous()
+        bu_fast = bu.contiguous()
+        with autocast("cuda", enabled=False):
+            return _run_sdlinoss_fast(variant, A_fast, G_fast, step_fast, bu_fast)
 
     def _fallback_from_views() -> Tensor:
         states = _reference_sdlinoss_states_from_views(

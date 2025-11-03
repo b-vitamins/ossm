@@ -78,7 +78,9 @@ The selective D-LinOSS kernels ship with a fast path that mirrors the reference 
 - `OSSM_SDLINOSS_FAST_X_ONLY=1` — store only the `x` trajectory during forward and reconstruct `w` in backward, cutting activation storage by roughly 2× while preserving numerics.
 - `OSSM_SDLINOSS_FAST_TILE={64,128,256}` — tile length for the associative scan (default 128).
 - `OSSM_FAST_UNROLL={1,2,4}` — inner-loop unroll factor for the fast kernels (default 2).
-- `OSSM_SDLINOSS_FAST_PREFETCH=1` — enable `cp.async` prefetch on SM80+ GPUs.
+- `OSSM_SDLINOSS_FAST_PREFETCH=1` (or legacy `OSSM_FAST_PREFETCH=1`) — enable `cp.async` prefetch on SM80+ GPUs.
+
+Fast kernels expect CUDA tensors laid out contiguously as `(L, B, M)` and always run with CUDA autocast disabled. The gradient mask clamps `step` strictly within `[1e-6, 1.0]`; when a step lands exactly on the boundary the corresponding `grad_step` entry is zero to match the reference recurrence. Parameter dtypes follow the reference path: `A`, `G`, and `step` are real-valued (`float32`/`float64`) and `bu` is complex with the matching precision.
 
 ### Running perf tests
 

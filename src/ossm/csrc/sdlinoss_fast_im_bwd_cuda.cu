@@ -94,11 +94,6 @@ __global__ void im_backward_kernel(
       const int64_t offset_series = t * series + idx;
       const int64_t offset_state = offset_series * 2;
 
-      const scalar_t state_w = states[offset_state];
-      const scalar_t state_x = states[offset_state + 1];
-      (void)state_w;
-      (void)state_x;
-
       const scalar_t prev_w =
           (t > 0) ? states[(offset_series - series) * 2] : scalar_t(0);
       const scalar_t prev_x =

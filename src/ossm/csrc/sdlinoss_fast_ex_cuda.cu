@@ -10,7 +10,10 @@
 #define OSSM_FAST_UNROLL 2
 #endif
 
-#if defined(OSSM_FAST_PREFETCH)
+#if !defined(OSSM_FAST_PREFETCH) && defined(OSSM_SDLINOSS_FAST_PREFETCH)
+#define OSSM_FAST_PREFETCH OSSM_SDLINOSS_FAST_PREFETCH
+#endif
+#if defined(OSSM_FAST_PREFETCH) && OSSM_FAST_PREFETCH
 #define OSSM_PREFETCH 1
 #else
 #define OSSM_PREFETCH 0
@@ -236,7 +239,7 @@ __global__ void ex_expand_tiles_write_states_kernel(
 #if __CUDA_ARCH__ >= 800 && OSSM_PREFETCH
   const int lane = threadIdx.x & 31;
   const int warp = threadIdx.x >> 5;
-  extern __shared__ unsigned char smem_u8[];
+  extern __shared__ __align__(16) unsigned char smem_u8[];
   constexpr int BYTES_VAL = sizeof(value_t);
   constexpr int BYTES_BU = sizeof(scalar_t);
   constexpr int BYTES_PER_WARP =
@@ -284,7 +287,7 @@ __global__ void ex_expand_tiles_write_states_kernel(
       cp_async_ca<sizeof(scalar_t)>(&shBU[lane], &bu[oBU]);
       asm volatile("cp.async.commit_group;\n");
       asm volatile("cp.async.wait_group 0;\n");
-      __syncthreads();
+      __syncwarp();
     }
 #endif
 
@@ -354,7 +357,7 @@ __global__ void ex_expand_tiles_write_states_kernel(
         cp_async_ca<sizeof(scalar_t)>(&shBU[lane], &bu[oBU_next]);
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_group 0;\n");
-        __syncthreads();
+        __syncwarp();
       }
 #endif
     }
@@ -398,7 +401,7 @@ __global__ void ex_expand_tiles_write_x_kernel(
 #if __CUDA_ARCH__ >= 800 && OSSM_PREFETCH
   const int lane = threadIdx.x & 31;
   const int warp = threadIdx.x >> 5;
-  extern __shared__ unsigned char smem_u8[];
+  extern __shared__ __align__(16) unsigned char smem_u8[];
   constexpr int BYTES_VAL = sizeof(value_t);
   constexpr int BYTES_BU = sizeof(scalar_t);
   constexpr int BYTES_PER_WARP = 32 * BYTES_VAL * 3 + 32 * BYTES_BU;
@@ -443,7 +446,7 @@ __global__ void ex_expand_tiles_write_x_kernel(
       cp_async_ca<sizeof(scalar_t)>(&shBU[lane], &bu[oBU]);
       asm volatile("cp.async.commit_group;\n");
       asm volatile("cp.async.wait_group 0;\n");
-      __syncthreads();
+      __syncwarp();
     }
 #endif
 
@@ -512,7 +515,7 @@ __global__ void ex_expand_tiles_write_x_kernel(
         cp_async_ca<sizeof(scalar_t)>(&shBU[lane], &bu[oBU_next]);
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_group 0;\n");
-        __syncthreads();
+        __syncwarp();
       }
 #endif
     }

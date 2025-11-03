@@ -149,8 +149,6 @@ __global__ void imex1_backward_xonly_kernel(
 
       grad_step_local = _fma_val(grad_S_raw, G_val, grad_step_local);
       grad_G_local = _fma_val(grad_S_raw, dt, grad_G_local);
-      grad_A_local = _fma_val(grad_S_raw, dt2, grad_A_local);
-
       const value_t tmp_step_real = value_t(2) * dt * comb_real;
       const value_t tmp_step_imag = value_t(2) * dt * comb_imag;
       grad_step_local = _fma_val(grad_tmpw_real, tmp_step_real, grad_step_local);

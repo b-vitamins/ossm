@@ -94,15 +94,10 @@ __global__ void imex1_backward_kernel(
       const int64_t offset_series = t * series + idx;
       const int64_t offset_state = offset_series * 2;
 
-      const scalar_t w_curr = states[offset_state];
-      const scalar_t x_new = states[offset_state + 1];
       const scalar_t prev_w =
           (t > 0) ? states[(offset_series - series) * 2] : scalar_t(0);
       const scalar_t prev_x =
           (t > 0) ? states[(offset_series - series) * 2 + 1] : scalar_t(0);
-
-      (void)w_curr;
-      (void)x_new;
 
       const value_t w_prev_real = prev_w.real();
       const value_t w_prev_imag = prev_w.imag();
