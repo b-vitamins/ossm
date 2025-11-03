@@ -63,7 +63,10 @@ struct GradStrided3 {
       if constexpr (std::is_same_v<scalar_t, float> || std::is_same_v<scalar_t, double>) {
         atomicAdd(addr, value);
       } else {
-        *addr = value;
+        using real_t = typename scalar_t::value_type;
+        auto real_addr = reinterpret_cast<real_t*>(addr);
+        atomicAdd(real_addr + 0, value.real());
+        atomicAdd(real_addr + 1, value.imag());
       }
     } else if (reduce_L) {
       *addr += value;
