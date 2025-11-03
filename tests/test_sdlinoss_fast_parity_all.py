@@ -73,7 +73,11 @@ def test_fast_parity_all(variant: str, dtype: torch.dtype, shape: tuple[int, int
 
 @pytest.mark.cuda
 @pytest.mark.parametrize("variant", ["ex", "imex1", "imex2", "im"])
-def test_fast_gradients_match_reference_with_broadcast(variant: str) -> None:
+@pytest.mark.parametrize("dtype", [torch.complex64, torch.complex128])
+@pytest.mark.parametrize("x_only", [False, True])
+def test_fast_gradients_match_reference_with_broadcast(
+    variant: str, dtype: torch.dtype, x_only: bool
+) -> None:
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for fast selective D-LinOSS kernels")
 
@@ -81,7 +85,9 @@ def test_fast_gradients_match_reference_with_broadcast(variant: str) -> None:
     import ossm.models._sdlinoss_scan as scan_mod
 
     original_env = os.environ.get("OSSM_SDLINOSS_FAST")
+    original_x_env = os.environ.get("OSSM_SDLINOSS_FAST_X_ONLY")
     os.environ["OSSM_SDLINOSS_FAST"] = "1"
+    os.environ["OSSM_SDLINOSS_FAST_X_ONLY"] = "1" if x_only else "0"
 
     try:
         fast_mod = importlib.reload(fast_mod)
@@ -95,14 +101,14 @@ def test_fast_gradients_match_reference_with_broadcast(variant: str) -> None:
         torch.cuda.manual_seed_all(1)
 
         length, batch, ssm = 5, 3, 2
-        real_dtype = torch.float64
+        real_dtype = torch.float32 if dtype == torch.complex64 else torch.float64
 
         A_base = torch.randn(length, 1, ssm, dtype=real_dtype, device=device)
         G_base = torch.randn(1, batch, 1, dtype=real_dtype, device=device)
         step_base = torch.rand(length, batch, 1, dtype=real_dtype, device=device) * 0.4 + 0.2
         bu_real = torch.randn(length, batch, ssm, dtype=real_dtype, device=device)
         bu_imag = torch.randn(length, batch, ssm, dtype=real_dtype, device=device)
-        bu_base = torch.complex(bu_real, bu_imag)
+        bu_base = torch.complex(bu_real, bu_imag).to(dtype)
 
         def make_inputs() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             return (
@@ -133,13 +139,23 @@ def test_fast_gradients_match_reference_with_broadcast(variant: str) -> None:
         finally:
             scan_mod._FAST_USE = original_fast_flag
 
+        if dtype == torch.complex64:
+            rtol, atol = 2e-4, 2e-5
+        else:
+            rtol, atol = 1e-5, 1e-6
+
         for grad_fast, grad_ref in zip(grads_fast, grads_ref):
-            torch.testing.assert_close(grad_fast, grad_ref, rtol=1e-5, atol=1e-6)
+            torch.testing.assert_close(grad_fast, grad_ref, rtol=rtol, atol=atol)
     finally:
         if original_env is None:
             os.environ.pop("OSSM_SDLINOSS_FAST", None)
         else:
             os.environ["OSSM_SDLINOSS_FAST"] = original_env
+
+        if original_x_env is None:
+            os.environ.pop("OSSM_SDLINOSS_FAST_X_ONLY", None)
+        else:
+            os.environ["OSSM_SDLINOSS_FAST_X_ONLY"] = original_x_env
 
         fast_mod = importlib.reload(fast_mod)
         importlib.reload(scan_mod)
@@ -147,7 +163,8 @@ def test_fast_gradients_match_reference_with_broadcast(variant: str) -> None:
 
 @pytest.mark.cuda
 @pytest.mark.parametrize("variant", ["ex", "imex1", "imex2", "im"])
-def test_fast_gradients_respect_step_clamp(variant: str) -> None:
+@pytest.mark.parametrize("x_only", [False, True])
+def test_fast_gradients_respect_step_clamp(variant: str, x_only: bool) -> None:
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for fast selective D-LinOSS kernels")
 
@@ -155,7 +172,9 @@ def test_fast_gradients_respect_step_clamp(variant: str) -> None:
     import ossm.models._sdlinoss_scan as scan_mod
 
     original_env = os.environ.get("OSSM_SDLINOSS_FAST")
+    original_x_env = os.environ.get("OSSM_SDLINOSS_FAST_X_ONLY")
     os.environ["OSSM_SDLINOSS_FAST"] = "1"
+    os.environ["OSSM_SDLINOSS_FAST_X_ONLY"] = "1" if x_only else "0"
 
     try:
         fast_mod = importlib.reload(fast_mod)
@@ -220,6 +239,11 @@ def test_fast_gradients_respect_step_clamp(variant: str) -> None:
             os.environ.pop("OSSM_SDLINOSS_FAST", None)
         else:
             os.environ["OSSM_SDLINOSS_FAST"] = original_env
+
+        if original_x_env is None:
+            os.environ.pop("OSSM_SDLINOSS_FAST_X_ONLY", None)
+        else:
+            os.environ["OSSM_SDLINOSS_FAST_X_ONLY"] = original_x_env
 
         fast_mod = importlib.reload(fast_mod)
         importlib.reload(scan_mod)

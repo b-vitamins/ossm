@@ -355,11 +355,6 @@ at::Tensor sdlinoss_fast_im_forward(const at::Tensor& A,
   TORCH_CHECK(ssm == A.size(2) && ssm == G.size(2) && ssm == step.size(2),
               "All parameters must agree on the state dimension.");
 
-  TORCH_CHECK(A.is_contiguous(), "A must be contiguous.");
-  TORCH_CHECK(G.is_contiguous(), "G must be contiguous.");
-  TORCH_CHECK(step.is_contiguous(), "step must be contiguous.");
-  TORCH_CHECK(bu.is_contiguous(), "bu must be contiguous.");
-
   const auto real_dtype = A.scalar_type();
   TORCH_CHECK(real_dtype == G.scalar_type() && real_dtype == step.scalar_type(),
               "A, G, and step must share the same real dtype.");
@@ -547,11 +542,6 @@ at::Tensor sdlinoss_fast_im_forward_xonly(const at::Tensor& A,
   TORCH_CHECK(ssm == A.size(2) && ssm == G.size(2) && ssm == step.size(2),
               "All parameters must agree on the state dimension.");
 
-  TORCH_CHECK(A.is_contiguous(), "A must be contiguous.");
-  TORCH_CHECK(G.is_contiguous(), "G must be contiguous.");
-  TORCH_CHECK(step.is_contiguous(), "step must be contiguous.");
-  TORCH_CHECK(bu.is_contiguous(), "bu must be contiguous.");
-
   const auto real_dtype = A.scalar_type();
   TORCH_CHECK(real_dtype == G.scalar_type() && real_dtype == step.scalar_type(),
               "A, G, and step must share the same real dtype.");
@@ -730,13 +720,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> sdlinoss_fast_im_back
               "states must have shape (L, B, M, 2).");
   TORCH_CHECK(grad_out.dim() == 3, "grad_out must have shape (L, B, M).");
 
-  TORCH_CHECK(states.is_contiguous(), "states must be contiguous.");
-  TORCH_CHECK(bu.is_contiguous(), "bu must be contiguous.");
-  TORCH_CHECK(A.is_contiguous(), "A must be contiguous.");
-  TORCH_CHECK(G.is_contiguous(), "G must be contiguous.");
-  TORCH_CHECK(step.is_contiguous(), "step must be contiguous.");
-  TORCH_CHECK(grad_out.is_contiguous(), "grad_out must be contiguous.");
-
   const auto length = bu.size(0);
   const auto batch = bu.size(1);
   const auto ssm = bu.size(2);
@@ -875,13 +858,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> sdlinoss_fast_im_back
   TORCH_CHECK(bu.dim() == 3, "bu must have shape (L, B, M).");
   TORCH_CHECK(x_only.dim() == 3, "x_only must have shape (L, B, M).");
   TORCH_CHECK(grad_out.dim() == 3, "grad_out must have shape (L, B, M).");
-
-  TORCH_CHECK(A.is_contiguous(), "A must be contiguous.");
-  TORCH_CHECK(G.is_contiguous(), "G must be contiguous.");
-  TORCH_CHECK(step.is_contiguous(), "step must be contiguous.");
-  TORCH_CHECK(bu.is_contiguous(), "bu must be contiguous.");
-  TORCH_CHECK(x_only.is_contiguous(), "x_only must be contiguous.");
-  TORCH_CHECK(grad_out.is_contiguous(), "grad_out must be contiguous.");
 
   const auto length = bu.size(0);
   const auto batch = bu.size(1);
