@@ -11,7 +11,10 @@
 #define OSSM_FAST_UNROLL 2
 #endif
 
-#if defined(OSSM_FAST_PREFETCH)
+#if !defined(OSSM_FAST_PREFETCH) && defined(OSSM_SDLINOSS_FAST_PREFETCH)
+#define OSSM_FAST_PREFETCH OSSM_SDLINOSS_FAST_PREFETCH
+#endif
+#if defined(OSSM_FAST_PREFETCH) && OSSM_FAST_PREFETCH
 #define OSSM_PREFETCH 1
 #else
 #define OSSM_PREFETCH 0
@@ -245,7 +248,7 @@ __global__ void im_prefix_tiles_per_series_kernel(
     return;
   }
 
-  extern __shared__ unsigned char smem_raw[];
+  extern __shared__ __align__(16) unsigned char smem_raw[];
   value_t* shm_m00 = reinterpret_cast<value_t*>(smem_raw);
   value_t* shm_m01 = shm_m00 + num_tiles;
   value_t* shm_m10 = shm_m01 + num_tiles;
@@ -355,7 +358,7 @@ __global__ void im_expand_tiles_write_states_kernel(
 #if __CUDA_ARCH__ >= 800 && OSSM_PREFETCH
   const int lane = threadIdx.x & 31;
   const int warp = threadIdx.x >> 5;
-  extern __shared__ unsigned char smem_u8[];
+  extern __shared__ __align__(16) unsigned char smem_u8[];
   constexpr int BYTES_VAL = sizeof(value_t);
   constexpr int BYTES_BU = sizeof(scalar_t);
   constexpr int BYTES_PER_WARP =
@@ -403,7 +406,7 @@ __global__ void im_expand_tiles_write_states_kernel(
       cp_async_ca<sizeof(scalar_t)>(&shBU[lane], &bu[oBU]);
       asm volatile("cp.async.commit_group;\n");
       asm volatile("cp.async.wait_group 0;\n");
-      __syncthreads();
+      __syncwarp();
     }
 #endif
 
@@ -473,7 +476,7 @@ __global__ void im_expand_tiles_write_states_kernel(
         cp_async_ca<sizeof(scalar_t)>(&shBU[lane], &bu[oBU_next]);
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_group 0;\n");
-        __syncthreads();
+        __syncwarp();
       }
 #endif
     }
@@ -517,7 +520,7 @@ __global__ void im_expand_tiles_write_x_kernel(
 #if __CUDA_ARCH__ >= 800 && OSSM_PREFETCH
   const int lane = threadIdx.x & 31;
   const int warp = threadIdx.x >> 5;
-  extern __shared__ unsigned char smem_u8[];
+  extern __shared__ __align__(16) unsigned char smem_u8[];
   constexpr int BYTES_VAL = sizeof(value_t);
   constexpr int BYTES_BU = sizeof(scalar_t);
   constexpr int BYTES_PER_WARP = 32 * BYTES_VAL * 3 + 32 * BYTES_BU;
@@ -562,7 +565,7 @@ __global__ void im_expand_tiles_write_x_kernel(
       cp_async_ca<sizeof(scalar_t)>(&shBU[lane], &bu[oBU]);
       asm volatile("cp.async.commit_group;\n");
       asm volatile("cp.async.wait_group 0;\n");
-      __syncthreads();
+      __syncwarp();
     }
 #endif
 
@@ -631,7 +634,7 @@ __global__ void im_expand_tiles_write_x_kernel(
         cp_async_ca<sizeof(scalar_t)>(&shBU[lane], &bu[oBU_next]);
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_group 0;\n");
-        __syncthreads();
+        __syncwarp();
       }
 #endif
     }
@@ -1058,6 +1061,8 @@ void dispatch_all(int vary_mask,
       break;
   }
 
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
   launch_prefix_kernel<scalar_t, TILE>(M00_ptr,
                                        M01_ptr,
                                        M10_ptr,
@@ -1069,6 +1074,8 @@ void dispatch_all(int vary_mask,
                                        series,
                                        num_tiles,
                                        stream);
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   switch (vary_mask) {
     case 0:
@@ -1213,27 +1220,29 @@ void dispatch_all(int vary_mask,
       break;
     case 7:
       launch_expand_kernel<scalar_t, true, true, true, TILE>(A_stride,
-                                                             G_stride,
-                                                             step_stride,
-                                                             bu_stride,
-                                                             A_ptr,
-                                                             G_ptr,
-                                                             step_ptr,
-                                                             bu_ptr,
-                                                             S0_w_ptr,
-                                                             S0_x_ptr,
-                                                             states_ptr,
-                                                             length,
-                                                             series,
-                                                             ssm,
-                                                             num_tiles,
-                                                             grid,
-                                                             block,
-                                                             stream);
+                                                              G_stride,
+                                                              step_stride,
+                                                              bu_stride,
+                                                              A_ptr,
+                                                              G_ptr,
+                                                              step_ptr,
+                                                              bu_ptr,
+                                                              S0_w_ptr,
+                                                              S0_x_ptr,
+                                                              states_ptr,
+                                                              length,
+                                                              series,
+                                                              ssm,
+                                                              num_tiles,
+                                                              grid,
+                                                              block,
+                                                              stream);
       break;
     default:
       break;
   }
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 template <typename scalar_t, int TILE>
@@ -1301,35 +1310,6 @@ void dispatch_all_x(int vary_mask,
                                                                grid,
                                                                block,
                                                                stream);
-      launch_prefix_kernel<scalar_t, TILE>(M00_ptr,
-                                           M01_ptr,
-                                           M10_ptr,
-                                           M11_ptr,
-                                           F0_ptr,
-                                           F1_ptr,
-                                           S0_w_ptr,
-                                           S0_x_ptr,
-                                           series,
-                                           num_tiles,
-                                           stream);
-      launch_expand_x_kernel<scalar_t, false, false, false, TILE>(A_stride,
-                                                                  G_stride,
-                                                                  step_stride,
-                                                                  bu_stride,
-                                                                  A_ptr,
-                                                                  G_ptr,
-                                                                  step_ptr,
-                                                                  bu_ptr,
-                                                                  S0_w_ptr,
-                                                                  S0_x_ptr,
-                                                                  x_only_ptr,
-                                                                  length,
-                                                                  series,
-                                                                  ssm,
-                                                                  num_tiles,
-                                                                  grid,
-                                                                  block,
-                                                                  stream);
       break;
     case 1:
       launch_build_kernel<scalar_t, true, false, false, TILE>(A_stride,
@@ -1353,35 +1333,6 @@ void dispatch_all_x(int vary_mask,
                                                               grid,
                                                               block,
                                                               stream);
-      launch_prefix_kernel<scalar_t, TILE>(M00_ptr,
-                                           M01_ptr,
-                                           M10_ptr,
-                                           M11_ptr,
-                                           F0_ptr,
-                                           F1_ptr,
-                                           S0_w_ptr,
-                                           S0_x_ptr,
-                                           series,
-                                           num_tiles,
-                                           stream);
-      launch_expand_x_kernel<scalar_t, true, false, false, TILE>(A_stride,
-                                                                 G_stride,
-                                                                 step_stride,
-                                                                 bu_stride,
-                                                                 A_ptr,
-                                                                 G_ptr,
-                                                                 step_ptr,
-                                                                 bu_ptr,
-                                                                 S0_w_ptr,
-                                                                 S0_x_ptr,
-                                                                 x_only_ptr,
-                                                                 length,
-                                                                 series,
-                                                                 ssm,
-                                                                 num_tiles,
-                                                                 grid,
-                                                                 block,
-                                                                 stream);
       break;
     case 2:
       launch_build_kernel<scalar_t, false, true, false, TILE>(A_stride,
@@ -1405,35 +1356,6 @@ void dispatch_all_x(int vary_mask,
                                                               grid,
                                                               block,
                                                               stream);
-      launch_prefix_kernel<scalar_t, TILE>(M00_ptr,
-                                           M01_ptr,
-                                           M10_ptr,
-                                           M11_ptr,
-                                           F0_ptr,
-                                           F1_ptr,
-                                           S0_w_ptr,
-                                           S0_x_ptr,
-                                           series,
-                                           num_tiles,
-                                           stream);
-      launch_expand_x_kernel<scalar_t, false, true, false, TILE>(A_stride,
-                                                                 G_stride,
-                                                                 step_stride,
-                                                                 bu_stride,
-                                                                 A_ptr,
-                                                                 G_ptr,
-                                                                 step_ptr,
-                                                                 bu_ptr,
-                                                                 S0_w_ptr,
-                                                                 S0_x_ptr,
-                                                                 x_only_ptr,
-                                                                 length,
-                                                                 series,
-                                                                 ssm,
-                                                                 num_tiles,
-                                                                 grid,
-                                                                 block,
-                                                                 stream);
       break;
     case 3:
       launch_build_kernel<scalar_t, true, true, false, TILE>(A_stride,
@@ -1457,35 +1379,6 @@ void dispatch_all_x(int vary_mask,
                                                              grid,
                                                              block,
                                                              stream);
-      launch_prefix_kernel<scalar_t, TILE>(M00_ptr,
-                                           M01_ptr,
-                                           M10_ptr,
-                                           M11_ptr,
-                                           F0_ptr,
-                                           F1_ptr,
-                                           S0_w_ptr,
-                                           S0_x_ptr,
-                                           series,
-                                           num_tiles,
-                                           stream);
-      launch_expand_x_kernel<scalar_t, true, true, false, TILE>(A_stride,
-                                                                G_stride,
-                                                                step_stride,
-                                                                bu_stride,
-                                                                A_ptr,
-                                                                G_ptr,
-                                                                step_ptr,
-                                                                bu_ptr,
-                                                                S0_w_ptr,
-                                                                S0_x_ptr,
-                                                                x_only_ptr,
-                                                                length,
-                                                                series,
-                                                                ssm,
-                                                                num_tiles,
-                                                                grid,
-                                                                block,
-                                                                stream);
       break;
     case 4:
       launch_build_kernel<scalar_t, false, false, true, TILE>(A_stride,
@@ -1509,35 +1402,6 @@ void dispatch_all_x(int vary_mask,
                                                               grid,
                                                               block,
                                                               stream);
-      launch_prefix_kernel<scalar_t, TILE>(M00_ptr,
-                                           M01_ptr,
-                                           M10_ptr,
-                                           M11_ptr,
-                                           F0_ptr,
-                                           F1_ptr,
-                                           S0_w_ptr,
-                                           S0_x_ptr,
-                                           series,
-                                           num_tiles,
-                                           stream);
-      launch_expand_x_kernel<scalar_t, false, false, true, TILE>(A_stride,
-                                                                 G_stride,
-                                                                 step_stride,
-                                                                 bu_stride,
-                                                                 A_ptr,
-                                                                 G_ptr,
-                                                                 step_ptr,
-                                                                 bu_ptr,
-                                                                 S0_w_ptr,
-                                                                 S0_x_ptr,
-                                                                 x_only_ptr,
-                                                                 length,
-                                                                 series,
-                                                                 ssm,
-                                                                 num_tiles,
-                                                                 grid,
-                                                                 block,
-                                                                 stream);
       break;
     case 5:
       launch_build_kernel<scalar_t, true, false, true, TILE>(A_stride,
@@ -1561,35 +1425,6 @@ void dispatch_all_x(int vary_mask,
                                                              grid,
                                                              block,
                                                              stream);
-      launch_prefix_kernel<scalar_t, TILE>(M00_ptr,
-                                           M01_ptr,
-                                           M10_ptr,
-                                           M11_ptr,
-                                           F0_ptr,
-                                           F1_ptr,
-                                           S0_w_ptr,
-                                           S0_x_ptr,
-                                           series,
-                                           num_tiles,
-                                           stream);
-      launch_expand_x_kernel<scalar_t, true, false, true, TILE>(A_stride,
-                                                                G_stride,
-                                                                step_stride,
-                                                                bu_stride,
-                                                                A_ptr,
-                                                                G_ptr,
-                                                                step_ptr,
-                                                                bu_ptr,
-                                                                S0_w_ptr,
-                                                                S0_x_ptr,
-                                                                x_only_ptr,
-                                                                length,
-                                                                series,
-                                                                ssm,
-                                                                num_tiles,
-                                                                grid,
-                                                                block,
-                                                                stream);
       break;
     case 6:
       launch_build_kernel<scalar_t, false, true, true, TILE>(A_stride,
@@ -1613,35 +1448,6 @@ void dispatch_all_x(int vary_mask,
                                                              grid,
                                                              block,
                                                              stream);
-      launch_prefix_kernel<scalar_t, TILE>(M00_ptr,
-                                           M01_ptr,
-                                           M10_ptr,
-                                           M11_ptr,
-                                           F0_ptr,
-                                           F1_ptr,
-                                           S0_w_ptr,
-                                           S0_x_ptr,
-                                           series,
-                                           num_tiles,
-                                           stream);
-      launch_expand_x_kernel<scalar_t, false, true, true, TILE>(A_stride,
-                                                                G_stride,
-                                                                step_stride,
-                                                                bu_stride,
-                                                                A_ptr,
-                                                                G_ptr,
-                                                                step_ptr,
-                                                                bu_ptr,
-                                                                S0_w_ptr,
-                                                                S0_x_ptr,
-                                                                x_only_ptr,
-                                                                length,
-                                                                series,
-                                                                ssm,
-                                                                num_tiles,
-                                                                grid,
-                                                                block,
-                                                                stream);
       break;
     case 7:
       launch_build_kernel<scalar_t, true, true, true, TILE>(A_stride,
@@ -1665,17 +1471,169 @@ void dispatch_all_x(int vary_mask,
                                                             grid,
                                                             block,
                                                             stream);
-      launch_prefix_kernel<scalar_t, TILE>(M00_ptr,
-                                           M01_ptr,
-                                           M10_ptr,
-                                           M11_ptr,
-                                           F0_ptr,
-                                           F1_ptr,
-                                           S0_w_ptr,
-                                           S0_x_ptr,
-                                           series,
-                                           num_tiles,
-                                           stream);
+      break;
+    default:
+      break;
+  }
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  launch_prefix_kernel<scalar_t, TILE>(M00_ptr,
+                                       M01_ptr,
+                                       M10_ptr,
+                                       M11_ptr,
+                                       F0_ptr,
+                                       F1_ptr,
+                                       S0_w_ptr,
+                                       S0_x_ptr,
+                                       series,
+                                       num_tiles,
+                                       stream);
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  switch (vary_mask) {
+    case 0:
+      launch_expand_x_kernel<scalar_t, false, false, false, TILE>(A_stride,
+                                                                  G_stride,
+                                                                  step_stride,
+                                                                  bu_stride,
+                                                                  A_ptr,
+                                                                  G_ptr,
+                                                                  step_ptr,
+                                                                  bu_ptr,
+                                                                  S0_w_ptr,
+                                                                  S0_x_ptr,
+                                                                  x_only_ptr,
+                                                                  length,
+                                                                  series,
+                                                                  ssm,
+                                                                  num_tiles,
+                                                                  grid,
+                                                                  block,
+                                                                  stream);
+      break;
+    case 1:
+      launch_expand_x_kernel<scalar_t, true, false, false, TILE>(A_stride,
+                                                                 G_stride,
+                                                                 step_stride,
+                                                                 bu_stride,
+                                                                 A_ptr,
+                                                                 G_ptr,
+                                                                 step_ptr,
+                                                                 bu_ptr,
+                                                                 S0_w_ptr,
+                                                                 S0_x_ptr,
+                                                                 x_only_ptr,
+                                                                 length,
+                                                                 series,
+                                                                 ssm,
+                                                                 num_tiles,
+                                                                 grid,
+                                                                 block,
+                                                                 stream);
+      break;
+    case 2:
+      launch_expand_x_kernel<scalar_t, false, true, false, TILE>(A_stride,
+                                                                 G_stride,
+                                                                 step_stride,
+                                                                 bu_stride,
+                                                                 A_ptr,
+                                                                 G_ptr,
+                                                                 step_ptr,
+                                                                 bu_ptr,
+                                                                 S0_w_ptr,
+                                                                 S0_x_ptr,
+                                                                 x_only_ptr,
+                                                                 length,
+                                                                 series,
+                                                                 ssm,
+                                                                 num_tiles,
+                                                                 grid,
+                                                                 block,
+                                                                 stream);
+      break;
+    case 3:
+      launch_expand_x_kernel<scalar_t, true, true, false, TILE>(A_stride,
+                                                                G_stride,
+                                                                step_stride,
+                                                                bu_stride,
+                                                                A_ptr,
+                                                                G_ptr,
+                                                                step_ptr,
+                                                                bu_ptr,
+                                                                S0_w_ptr,
+                                                                S0_x_ptr,
+                                                                x_only_ptr,
+                                                                length,
+                                                                series,
+                                                                ssm,
+                                                                num_tiles,
+                                                                grid,
+                                                                block,
+                                                                stream);
+      break;
+    case 4:
+      launch_expand_x_kernel<scalar_t, false, false, true, TILE>(A_stride,
+                                                                 G_stride,
+                                                                 step_stride,
+                                                                 bu_stride,
+                                                                 A_ptr,
+                                                                 G_ptr,
+                                                                 step_ptr,
+                                                                 bu_ptr,
+                                                                 S0_w_ptr,
+                                                                 S0_x_ptr,
+                                                                 x_only_ptr,
+                                                                 length,
+                                                                 series,
+                                                                 ssm,
+                                                                 num_tiles,
+                                                                 grid,
+                                                                 block,
+                                                                 stream);
+      break;
+    case 5:
+      launch_expand_x_kernel<scalar_t, true, false, true, TILE>(A_stride,
+                                                                G_stride,
+                                                                step_stride,
+                                                                bu_stride,
+                                                                A_ptr,
+                                                                G_ptr,
+                                                                step_ptr,
+                                                                bu_ptr,
+                                                                S0_w_ptr,
+                                                                S0_x_ptr,
+                                                                x_only_ptr,
+                                                                length,
+                                                                series,
+                                                                ssm,
+                                                                num_tiles,
+                                                                grid,
+                                                                block,
+                                                                stream);
+      break;
+    case 6:
+      launch_expand_x_kernel<scalar_t, false, true, true, TILE>(A_stride,
+                                                                G_stride,
+                                                                step_stride,
+                                                                bu_stride,
+                                                                A_ptr,
+                                                                G_ptr,
+                                                                step_ptr,
+                                                                bu_ptr,
+                                                                S0_w_ptr,
+                                                                S0_x_ptr,
+                                                                x_only_ptr,
+                                                                length,
+                                                                series,
+                                                                ssm,
+                                                                num_tiles,
+                                                                grid,
+                                                                block,
+                                                                stream);
+      break;
+    case 7:
       launch_expand_x_kernel<scalar_t, true, true, true, TILE>(A_stride,
                                                                G_stride,
                                                                step_stride,
@@ -1698,6 +1656,8 @@ void dispatch_all_x(int vary_mask,
     default:
       break;
   }
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 template <typename scalar_t, int TILE>

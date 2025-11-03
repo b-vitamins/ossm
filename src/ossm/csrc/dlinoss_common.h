@@ -6,6 +6,7 @@
 #include <c10/macros/Macros.h>
 #include <c10/util/Exception.h>
 #include <c10/util/complex.h>
+#include <type_traits>
 
 namespace ossm {
 
@@ -57,13 +58,20 @@ struct GradStrided3 {
     const int64_t mm = nM == 1 ? 0 : m;
     scalar_t* addr = p + tt * sL + bb * sB + mm * sM;
 #ifdef __CUDA_ARCH__
-    if (reduce_L || reduce_B || reduce_M) {
-      atomicAdd(addr, value);
+    const bool reduce_broadcast = (sB == 0 || sM == 0);
+    if (reduce_broadcast) {
+      if constexpr (std::is_same_v<scalar_t, float> || std::is_same_v<scalar_t, double>) {
+        atomicAdd(addr, value);
+      } else {
+        *addr = value;
+      }
+    } else if (reduce_L) {
+      *addr += value;
     } else {
       *addr = value;
     }
 #else
-    if (reduce_L || reduce_B || reduce_M) {
+    if (reduce_L || sB == 0 || sM == 0) {
       *addr += value;
     } else {
       *addr = value;

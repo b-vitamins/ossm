@@ -105,6 +105,7 @@ std::vector<at::Tensor> sdlinoss_ex_backward(const at::Tensor& A,
                                              const at::Tensor& states,
                                              const at::Tensor& grad_output);
 
+#ifdef WITH_CUDA
 // Forward declarations for the selective D-LinOSS fast CUDA kernels.
 at::Tensor sdlinoss_fast_ex_forward(const at::Tensor& A,
                                     const at::Tensor& G,
@@ -209,6 +210,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> sdlinoss_fast_im_back
     const at::Tensor& bu,
     const at::Tensor& x_only,
     const at::Tensor& grad_out);
+#endif
 
 at::Tensor lru_scan(const at::Tensor& lambda_real,
                     const at::Tensor& lambda_imag,
@@ -297,88 +299,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Selective D-LinOSS fast IM backward kernel (x-only states)");
 #else
   m.def("sdlinoss_fast_has_kernels", []() { return false; });
-  m.def("sdlinoss_fast_ex_forward",
-        [](const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&) {
-          TORCH_CHECK(false, "fast ex forward requires CUDA support");
-          return at::Tensor();
-        });
-  m.def("sdlinoss_fast_ex_forward_xonly",
-        [](const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&) {
-          TORCH_CHECK(false, "fast ex forward (x-only) requires CUDA support");
-          return at::Tensor();
-        });
-  m.def(
-      "sdlinoss_fast_ex_backward",
-      [](at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor) {
-        TORCH_CHECK(false, "fast ex backward requires CUDA support");
-        return std::make_tuple(at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor());
-      });
-  m.def(
-      "sdlinoss_fast_ex_backward_xonly",
-      [](at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor) {
-        TORCH_CHECK(false, "fast ex backward (x-only) requires CUDA support");
-        return std::make_tuple(at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor());
-      });
-  m.def("sdlinoss_fast_imex1_forward",
-        [](const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&) {
-          TORCH_CHECK(false, "fast imex1 forward requires CUDA support");
-          return at::Tensor();
-        });
-  m.def("sdlinoss_fast_imex1_forward_xonly",
-        [](const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&) {
-          TORCH_CHECK(false, "fast imex1 forward (x-only) requires CUDA support");
-          return at::Tensor();
-        });
-  m.def("sdlinoss_fast_imex1_backward",
-        [](at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor) {
-          TORCH_CHECK(false, "fast imex1 backward requires CUDA support");
-          return std::make_tuple(at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor());
-        });
-  m.def("sdlinoss_fast_imex1_backward_xonly",
-        [](at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor) {
-          TORCH_CHECK(false, "fast imex1 backward (x-only) requires CUDA support");
-          return std::make_tuple(at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor());
-        });
-  m.def("sdlinoss_fast_imex2_forward",
-        [](const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&) {
-          TORCH_CHECK(false, "fast imex2 forward requires CUDA support");
-          return at::Tensor();
-        });
-  m.def("sdlinoss_fast_imex2_forward_xonly",
-        [](const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&) {
-          TORCH_CHECK(false, "fast imex2 forward (x-only) requires CUDA support");
-          return at::Tensor();
-        });
-  m.def("sdlinoss_fast_imex2_backward",
-        [](at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor) {
-          TORCH_CHECK(false, "fast imex2 backward requires CUDA support");
-          return std::make_tuple(at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor());
-        });
-  m.def("sdlinoss_fast_imex2_backward_xonly",
-        [](at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor) {
-          TORCH_CHECK(false, "fast imex2 backward (x-only) requires CUDA support");
-          return std::make_tuple(at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor());
-        });
-  m.def("sdlinoss_fast_im_forward",
-        [](const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&) {
-          TORCH_CHECK(false, "fast im forward requires CUDA support");
-          return at::Tensor();
-        });
-  m.def("sdlinoss_fast_im_backward",
-        [](at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor) {
-          TORCH_CHECK(false, "fast im backward requires CUDA support");
-          return std::make_tuple(at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor());
-        });
-  m.def("sdlinoss_fast_im_forward_xonly",
-        [](const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&) {
-          TORCH_CHECK(false, "fast im forward (x-only) requires CUDA support");
-          return at::Tensor();
-        });
-  m.def("sdlinoss_fast_im_backward_xonly",
-        [](at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor) {
-          TORCH_CHECK(false, "fast im backward (x-only) requires CUDA support");
-          return std::make_tuple(at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor());
-        });
 #endif
 
   m.def("linoss_scan", &ossm::linoss_scan, "LinOSS associative scan kernel");

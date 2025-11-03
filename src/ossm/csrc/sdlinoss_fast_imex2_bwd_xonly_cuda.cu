@@ -104,11 +104,6 @@ __global__ void imex2_backward_xonly_kernel(
       const value_t x_prevprev_real = x_prevprev.real();
       const value_t x_prevprev_imag = x_prevprev.imag();
 
-      const value_t w_new_real = x_new_real - x_prev_real;
-      const value_t w_new_imag = x_new_imag - x_prev_imag;
-      (void)w_new_real;
-      (void)w_new_imag;
-
       const value_t w_prev_real =
           (t > 0) ? (x_prev_real - x_prevprev_real) : value_t(0);
       const value_t w_prev_imag =

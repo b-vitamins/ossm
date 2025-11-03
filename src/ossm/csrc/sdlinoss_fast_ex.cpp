@@ -610,7 +610,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> sdlinoss_fast_ex_back
     auto grad_G = at::zeros_like(G);
     auto grad_step = at::zeros_like(step);
     auto grad_bu = at::zeros_like(bu);
-    return {grad_A, grad_G, grad_step, grad_bu};
+    return std::make_tuple(grad_A, grad_G, grad_step, grad_bu);
   }
 
   const int64_t tile_env = parse_tile_env();
@@ -674,7 +674,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> sdlinoss_fast_ex_back
     }
   });
 
-  return {grad_A, grad_G, grad_step, grad_bu};
+  return std::make_tuple(grad_A, grad_G, grad_step, grad_bu);
 #endif  // WITH_CUDA
 }
 
@@ -755,7 +755,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> sdlinoss_fast_ex_back
     auto grad_G = at::zeros_like(G);
     auto grad_step = at::zeros_like(step);
     auto grad_bu = at::zeros_like(bu);
-    return {grad_A, grad_G, grad_step, grad_bu};
+    return std::make_tuple(grad_A, grad_G, grad_step, grad_bu);
   }
 
   const int64_t tile_env = parse_tile_env();
@@ -818,7 +818,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> sdlinoss_fast_ex_back
     }
   });
 
-  return {grad_A, grad_G, grad_step, grad_bu};
+  return std::make_tuple(grad_A, grad_G, grad_step, grad_bu);
 #endif  // WITH_CUDA
 }
 
