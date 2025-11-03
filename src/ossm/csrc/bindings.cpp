@@ -136,12 +136,25 @@ at::Tensor sdlinoss_fast_imex1_forward(const at::Tensor& A,
                                        const at::Tensor& step,
                                        const at::Tensor& bu);
 
+at::Tensor sdlinoss_fast_imex1_forward_xonly(const at::Tensor& A,
+                                             const at::Tensor& G,
+                                             const at::Tensor& step,
+                                             const at::Tensor& bu);
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> sdlinoss_fast_imex1_backward(
     const at::Tensor& A,
     const at::Tensor& G,
     const at::Tensor& step,
     const at::Tensor& bu,
     const at::Tensor& states,
+    const at::Tensor& grad_out);
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> sdlinoss_fast_imex1_backward_xonly(
+    const at::Tensor& A,
+    const at::Tensor& G,
+    const at::Tensor& step,
+    const at::Tensor& bu,
+    const at::Tensor& x_only,
     const at::Tensor& grad_out);
 
 at::Tensor sdlinoss_fast_imex2_forward(const at::Tensor& A,
@@ -175,12 +188,25 @@ at::Tensor sdlinoss_fast_im_forward(const at::Tensor& A,
                                     const at::Tensor& step,
                                     const at::Tensor& bu);
 
+at::Tensor sdlinoss_fast_im_forward_xonly(const at::Tensor& A,
+                                          const at::Tensor& G,
+                                          const at::Tensor& step,
+                                          const at::Tensor& bu);
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> sdlinoss_fast_im_backward(
     const at::Tensor& A,
     const at::Tensor& G,
     const at::Tensor& step,
     const at::Tensor& bu,
     const at::Tensor& states,
+    const at::Tensor& grad_out);
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> sdlinoss_fast_im_backward_xonly(
+    const at::Tensor& A,
+    const at::Tensor& G,
+    const at::Tensor& step,
+    const at::Tensor& bu,
+    const at::Tensor& x_only,
     const at::Tensor& grad_out);
 
 at::Tensor lru_scan(const at::Tensor& lambda_real,
