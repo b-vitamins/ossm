@@ -24,6 +24,7 @@ from .sdlinoss import (
     SelectiveDLinOSSBlock,
     SelectiveDLinOSSLayer,
     run_sdlinoss,
+    has_fast_kernels,
 )
 
 __all__: tuple[str, ...] = (
@@ -67,4 +68,5 @@ __all__: tuple[str, ...] = (
     "SelectiveDLinOSSLayer",
     "TiedSoftmaxHead",
     "run_sdlinoss",
+    "has_fast_kernels",
 )

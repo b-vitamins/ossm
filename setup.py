@@ -17,6 +17,13 @@ from torch.utils.cpp_extension import (
 root = Path(__file__).resolve().parent
 src_dir = root / "src" / "ossm" / "csrc"
 
+
+def _gather_sources(*patterns: str) -> list[str]:
+    files: set[str] = set()
+    for pattern in patterns:
+        files.update(_relative_posix(path) for path in src_dir.glob(pattern))
+    return sorted(files)
+
 def _relative_posix(path: Path) -> str:
     """Return a path relative to the project root using POSIX separators."""
 
@@ -37,14 +44,14 @@ if suffix:
     normalized_suffix = re.sub(r"[^0-9A-Za-z.-]", "-", suffix)
     version = f"{version}+{normalized_suffix}"
 
-cpp_sources = sorted(_relative_posix(path) for path in src_dir.glob("*.cpp"))
-cuda_sources = sorted(_relative_posix(path) for path in src_dir.glob("*.cu"))
+cpp_sources = _gather_sources("*.cpp", "sdlinoss_fast/**/*.cpp")
+cuda_sources = _gather_sources("*.cu", "sdlinoss_fast/**/*.cu")
 
 use_cuda = bool(cuda_sources) and CUDA_HOME is not None
 sources = cpp_sources + (cuda_sources if use_cuda else [])
 extension_cls = CUDAExtension if use_cuda else CppExtension
 
-extra_compile_args = {"cxx": ["-O3", "-std=c++17", "-march=native"]}
+extra_compile_args = {"cxx": ["-O3", "-std=c++17", "-march=native", "-DOSSM_FAST=1"]}
 extra_link_args: list[str] = []
 
 if os.name == "nt":
@@ -75,6 +82,12 @@ if use_cuda:
         token = arch_list.split()[0].replace(".", "")
         if token.isdigit():
             nvcc_flags.append(f"-gencode=arch=compute_{token},code=sm_{token}")
+    nvcc_flags.append("-DOSSM_FAST=1")
+    if os.environ.get("OSSM_SDLINOSS_FAST_PREFETCH") == "1":
+        nvcc_flags.append("-DOSSM_FAST_PREFETCH=1")
+    nvcc_flags.append(
+        f"-DOSSM_FAST_UNROLL={int(os.getenv('OSSM_FAST_UNROLL', '2'))}"
+    )
     extra_compile_args["nvcc"] = nvcc_flags
 
 extension_kwargs = dict(
