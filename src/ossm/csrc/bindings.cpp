@@ -151,6 +151,7 @@ std::vector<at::Tensor> selective_scan_cuda_backward(const at::Tensor& grad_outp
                                                      const at::Tensor& C,
                                                      const c10::optional<at::Tensor>& gate,
                                                      const at::Tensor& chunk_states,
+                                                     const at::Tensor& raw_outputs,
                                                      int64_t chunk_length);
 #endif
 }  // namespace ossm
@@ -217,6 +218,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("C"),
         py::arg("gate") = py::none(),
         py::arg("chunk_states"),
+        py::arg("raw_outputs"),
         py::arg("chunk_length"));
 #endif
 }
