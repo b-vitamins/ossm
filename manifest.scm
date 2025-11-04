@@ -9,6 +9,7 @@
    "python-torchsignature"
    "python-sktime"
    "python-pytest"
+   "python-recbole"
    "python-ruff"
    "node-pyright"
    "cuda-toolkit"
