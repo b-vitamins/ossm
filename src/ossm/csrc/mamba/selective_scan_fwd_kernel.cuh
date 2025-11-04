@@ -17,9 +17,9 @@
     namespace cub = hipcub;
 #endif
 
-#include "mamba/selective_scan.h"
-#include "mamba/selective_scan_common.h"
-#include "mamba/static_switch.h"
+#include "selective_scan.h"
+#include "selective_scan_common.h"
+#include "static_switch.h"
 
 template<int kNThreads_, int kNItems_, int kNRows_, bool kIsEvenLen_,
          bool kIsVariableB_, bool kIsVariableC_,

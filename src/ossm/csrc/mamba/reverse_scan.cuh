@@ -15,7 +15,7 @@
     #include <hipcub/hipcub.hpp>
     namespace cub = hipcub;
 #endif
-#include "mamba/uninitialized_copy.cuh"
+#include "uninitialized_copy.cuh"
 
 /**
  * Perform a reverse sequential reduction over \p LENGTH elements of the \p input array.  The aggregate is returned.

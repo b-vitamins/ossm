@@ -19,11 +19,11 @@
     namespace cub = hipcub;
 #endif
 
-#include "mamba/selective_scan.h"
-#include "mamba/selective_scan_common.h"
-#include "mamba/reverse_scan.cuh"
-#include "mamba/static_switch.h"
-#include "mamba/uninitialized_copy.cuh"
+#include "selective_scan.h"
+#include "selective_scan_common.h"
+#include "reverse_scan.cuh"
+#include "static_switch.h"
+#include "uninitialized_copy.cuh"
 
 template<typename scalar_t> __device__ __forceinline__ scalar_t conj(scalar_t x);
 template<> __device__ __forceinline__ float conj<float>(float x) { return x; }
