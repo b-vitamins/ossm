@@ -1,1 +1,1 @@
-recursive-include src/ossm/csrc *.h *.cpp *.cu
+recursive-include src/ossm/csrc *.h *.hpp *.cpp *.cu *.cuh

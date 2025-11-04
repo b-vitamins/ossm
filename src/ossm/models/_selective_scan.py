@@ -49,7 +49,7 @@ class _SelectiveScanKernels(Protocol):
         C: Tensor,
         gate: Optional[Tensor],
         chunk: int,
-    ) -> tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor]:
         ...
 
     def selective_scan_cuda_backward(
@@ -62,6 +62,7 @@ class _SelectiveScanKernels(Protocol):
         C: Tensor,
         gate: Optional[Tensor],
         chunk_states: Tensor,
+        raw_outputs: Tensor,
         chunk: int,
     ) -> Gradients:
         ...
@@ -180,10 +181,10 @@ def try_selective_scan(
                 safe_max = 1
             chunk = max(1, min(chunk, safe_max))
 
-    if not requires_grad:
-        if device_type == "cuda":
-            outputs, _ = kernels.selective_scan_cuda(inputs, dt, A, B, C, gate, chunk)
+        if not requires_grad:
+            outputs, _, _ = kernels.selective_scan_cuda(inputs, dt, A, B, C, gate, chunk)
             return outputs
+    elif not requires_grad:
         return kernels.selective_scan(inputs, dt, A, B, C, gate)
 
     try:
@@ -239,10 +240,12 @@ class _SelectiveScanFn(torch.autograd.Function):
         kernels = _require_kernels()
 
         if ctx_attrs.use_cuda:
-            outputs, chunk_states = kernels.selective_scan_cuda(
+            outputs, chunk_states, raw_outputs = kernels.selective_scan_cuda(
                 inputs_c, dt_c, A_c, B_c, C_c, gate_tensor, chunk
             )
-            ctx.save_for_backward(inputs_c, dt_c, A_c, B_c, C_c, gate_saved, chunk_states)
+            ctx.save_for_backward(
+                inputs_c, dt_c, A_c, B_c, C_c, gate_saved, chunk_states, raw_outputs
+            )
             return outputs
 
         outputs = kernels.selective_scan(inputs_c, dt_c, A_c, B_c, C_c, gate_tensor)
@@ -257,7 +260,7 @@ class _SelectiveScanFn(torch.autograd.Function):
         kernels = _require_kernels()
 
         if ctx_attrs.use_cuda:
-            inputs, dt, A, B, C, gate_saved, chunk_states = ctx_attrs.saved_tensors
+            inputs, dt, A, B, C, gate_saved, chunk_states, raw_outputs = ctx_attrs.saved_tensors
             gate_opt = gate_saved if ctx_attrs.has_gate else None
             grad_inputs, grad_dt, grad_A, grad_B, grad_C, grad_gate = (
                 kernels.selective_scan_cuda_backward(
@@ -269,6 +272,7 @@ class _SelectiveScanFn(torch.autograd.Function):
                     C,
                     gate_opt,
                     chunk_states,
+                    raw_outputs,
                     ctx_attrs.chunk,
                 )
             )
